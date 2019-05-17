@@ -171,19 +171,19 @@ func (r *receiver) consumeSegment(s *segment, segSeq seqnum.Value, segLen seqnum
 		// We just received a FIN, our next state depends on whether we sent a
 		// FIN already or not.
 		r.ep.mu.Lock()
-		switch r.ep.state {
+		switch r.ep.EndpointState() {
 		case StateEstablished:
-			r.ep.state = StateCloseWait
+			r.ep.setEndpointState(StateCloseWait)
 		case StateFinWait1:
 			if s.flagIsSet(header.TCPFlagAck) {
 				// FIN-ACK, transition to TIME-WAIT.
-				r.ep.state = StateTimeWait
+				r.ep.setEndpointState(StateTimeWait)
 			} else {
 				// Simultaneous close, expecting a final ACK.
-				r.ep.state = StateClosing
+				r.ep.setEndpointState(StateClosing)
 			}
 		case StateFinWait2:
-			r.ep.state = StateTimeWait
+			r.ep.setEndpointState(StateTimeWait)
 		}
 		r.ep.mu.Unlock()
 
@@ -207,16 +207,16 @@ func (r *receiver) consumeSegment(s *segment, segSeq seqnum.Value, segLen seqnum
 	// shutdown states.
 	if s.flagIsSet(header.TCPFlagAck) {
 		r.ep.mu.Lock()
-		switch r.ep.state {
+		switch r.ep.EndpointState() {
 		case StateFinWait1:
-			r.ep.state = StateFinWait2
+			r.ep.setEndpointState(StateFinWait2)
 			// Notify protocol goroutine that we have received an
 			// ACK to our FIN so that it can start the FIN_WAIT2
 			// timer to abort connection if the other side does
 			// not close within 2MSL.
 			r.ep.notifyProtocolGoroutine(notifyClose)
 		case StateClosing:
-			r.ep.state = StateTimeWait
+			r.ep.setEndpointState(StateTimeWait)
 		case StateLastAck:
 			r.ep.transitionToStateCloseLocked()
 		}
@@ -269,7 +269,6 @@ func (r *receiver) handleRcvdSegmentClosing(s *segment, state EndpointState, clo
 	switch state {
 	case StateCloseWait, StateClosing, StateLastAck:
 		if !s.sequenceNumber.LessThanEq(r.rcvNxt) {
-			s.decRef()
 			// Just drop the segment as we have
 			// already received a FIN and this
 			// segment is after the sequence number
@@ -286,7 +285,6 @@ func (r *receiver) handleRcvdSegmentClosing(s *segment, state EndpointState, clo
 		// trigger a RST.
 		endDataSeq := s.sequenceNumber.Add(seqnum.Size(s.data.Size()))
 		if rcvClosed && r.rcvNxt.LessThan(endDataSeq) {
-			s.decRef()
 			return true, tcpip.ErrConnectionAborted
 		}
 		if state == StateFinWait1 {
@@ -316,7 +314,6 @@ func (r *receiver) handleRcvdSegmentClosing(s *segment, state EndpointState, clo
 		// the last actual data octet in a segment in
 		// which it occurs.
 		if closed && (!s.flagIsSet(header.TCPFlagFin) || s.sequenceNumber.Add(s.logicalLen()) != r.rcvNxt+1) {
-			s.decRef()
 			return true, tcpip.ErrConnectionAborted
 		}
 	}
@@ -338,7 +335,7 @@ func (r *receiver) handleRcvdSegmentClosing(s *segment, state EndpointState, clo
 // r as they arrive. It is called by the protocol main loop.
 func (r *receiver) handleRcvdSegment(s *segment) (drop bool, err *tcpip.Error) {
 	r.ep.mu.RLock()
-	state := r.ep.state
+	state := r.ep.EndpointState()
 	closed := r.ep.closed
 	r.ep.mu.RUnlock()
 

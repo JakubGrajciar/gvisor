@@ -16,6 +16,18 @@ go_template_instance(
     },
 )
 
+go_template_instance(
+    name = "tcp_endpoing_list",
+    out = "tcp_endpoint_list.go",
+    package = "tcp",
+    prefix = "queueEndpoint",
+    template = "//pkg/ilist:generic_list",
+    types = {
+        "Element": "*queueEndpoint",
+        "Linker": "*queueEndpoint",
+    },
+)
+
 go_library(
     name = "tcp",
     srcs = [
@@ -23,7 +35,9 @@ go_library(
         "connect.go",
         "cubic.go",
         "cubic_state.go",
+        "dispatcher.go",
         "endpoint.go",
+        "endpoint_queue.go",
         "endpoint_state.go",
         "forwarder.go",
         "protocol.go",
@@ -37,6 +51,7 @@ go_library(
         "segment_state.go",
         "snd.go",
         "snd_state.go",
+        "tcp_endpoint_list.go",
         "tcp_segment_list.go",
         "timer.go",
     ],
@@ -44,7 +59,6 @@ go_library(
     imports = ["gvisor.dev/gvisor/pkg/tcpip/buffer"],
     visibility = ["//visibility:public"],
     deps = [
-        "//pkg/log",
         "//pkg/rand",
         "//pkg/sleep",
         "//pkg/tcpip",
@@ -64,6 +78,7 @@ go_library(
 filegroup(
     name = "autogen",
     srcs = [
+        "tcp_endpoint_list.go",
         "tcp_segment_list.go",
     ],
     visibility = ["//:sandbox"],
