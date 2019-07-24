@@ -25,6 +25,7 @@ import (
 	"gvisor.dev/gvisor/pkg/seccomp"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/safemem"
+	"gvisor.dev/gvisor/pkg/sentry/usage"
 	"gvisor.dev/gvisor/pkg/sentry/usermem"
 )
 
@@ -148,6 +149,8 @@ type Context interface {
 	// Interrupt interrupts a concurrent call to Switch(), causing it to return
 	// ErrContextInterrupt.
 	Interrupt()
+
+	Release()
 }
 
 var (
@@ -353,9 +356,15 @@ func (fr FileRange) String() string {
 	return fmt.Sprintf("[%#x, %#x)", fr.Start, fr.End)
 }
 
+type MemoryFile interface {
+	Allocate(length uint64, kind usage.MemoryKind) (FileRange, error)
+	DecRef(fr FileRange)
+	FD() int
+}
+
 // Constructor represents a platform type.
 type Constructor interface {
-	New(deviceFile *os.File) (Platform, error)
+	New(deviceFile *os.File, memFile MemoryFile) (Platform, error)
 	OpenDevice() (*os.File, error)
 }
 

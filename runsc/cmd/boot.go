@@ -173,7 +173,7 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...interface{}) 
 		if caps == nil {
 			caps = &specs.LinuxCapabilities{}
 		}
-		if conf.Platform == platforms.Ptrace {
+		if conf.Platform == platforms.Ptrace || conf.Platform == platforms.Seccomp {
 			// Ptrace platform requires extra capabilities.
 			const c = "CAP_SYS_PTRACE"
 			caps.Bounding = append(caps.Bounding, c)

@@ -27,4 +27,7 @@ const (
 
 	// KVM runs the sandbox with the KVM platform.
 	KVM = "kvm"
+
+	// Seccomp runs the sandbox with the seccomp platform.
+	Seccomp = "seccomp"
 )

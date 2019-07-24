@@ -85,3 +85,7 @@ func (c *context) Switch(as platform.AddressSpace, ac arch.Context, _ int32) (*a
 func (c *context) Interrupt() {
 	c.interrupt.NotifyInterrupt()
 }
+
+func (c *context) Release() {
+	return
+}

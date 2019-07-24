@@ -144,7 +144,7 @@ func (k *KVM) NewContext() platform.Context {
 
 type constructor struct{}
 
-func (*constructor) New(f *os.File) (platform.Platform, error) {
+func (*constructor) New(f *os.File, _ platform.MemoryFile) (platform.Platform, error) {
 	return New(f)
 }
 

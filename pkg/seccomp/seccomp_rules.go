@@ -62,7 +62,9 @@ func (a AllowValue) String() (s string) {
 // rule := Rule {
 //       AllowValue(linux.ARCH_GET_FS | linux.ARCH_SET_FS), // arg0
 // }
-type Rule [6]interface{}
+type Rule [7]interface{} // 6 arguments + RIP
+
+const RuleIP = 6
 
 func (r Rule) String() (s string) {
 	if len(r) == 0 {

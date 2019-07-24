@@ -46,6 +46,15 @@ func SetFilter(instrs []linux.BPFInstruction) syscall.Errno {
 	return seccomp(linux.SECCOMP_SET_MODE_FILTER, linux.SECCOMP_FILTER_FLAG_TSYNC, unsafe.Pointer(&sockProg))
 }
 
+// SetSockProg fills the sockFprog structure.
+func SetSockProg(instrs uintptr, size uintptr, _sockProg unsafe.Pointer) {
+	var sockProg *sockFprog
+
+	sockProg = (*sockFprog)(_sockProg)
+	sockProg.Len = uint16(size)
+	sockProg.Filter = (*linux.BPFInstruction)(unsafe.Pointer(instrs))
+}
+
 func isKillProcessAvailable() (bool, error) {
 	action := uint32(linux.SECCOMP_RET_KILL_PROCESS)
 	if errno := seccomp(linux.SECCOMP_GET_ACTION_AVAIL, 0, unsafe.Pointer(&action)); errno != 0 {

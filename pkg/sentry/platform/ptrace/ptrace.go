@@ -177,6 +177,10 @@ func (c *context) Interrupt() {
 	c.interrupt.NotifyInterrupt()
 }
 
+func (c *context) Release() {
+	return
+}
+
 // PTrace represents a collection of ptrace subprocesses.
 type PTrace struct {
 	platform.MMapMinAddr
@@ -240,7 +244,7 @@ func (*PTrace) NewContext() platform.Context {
 
 type constructor struct{}
 
-func (*constructor) New(*os.File) (platform.Platform, error) {
+func (*constructor) New(*os.File, platform.MemoryFile) (platform.Platform, error) {
 	return New()
 }
 
