@@ -266,6 +266,28 @@ func SolicitedNodeAddr(addr tcpip.Address) tcpip.Address {
 	return solicitedNodeMulticastPrefix + addr[len(addr)-3:]
 }
 
+// EthernetAdddressToEUI64IntoBuf populates buf with a EUI-64 from a 48-bit
+// Ethernet/MAC address.
+//
+// buf MUST be at least 8 bytes.
+func EthernetAdddressToEUI64IntoBuf(linkAddr tcpip.LinkAddress, buf []byte) {
+	buf[0] = linkAddr[0] ^ 2
+	buf[1] = linkAddr[1]
+	buf[2] = linkAddr[2]
+	buf[3] = 0xFE
+	buf[4] = 0xFE
+	buf[5] = linkAddr[3]
+	buf[6] = linkAddr[4]
+	buf[7] = linkAddr[5]
+}
+
+// EthernetAddressToEUI64 computes an EUI-64 from a 48-bit Ethernet/MAC address.
+func EthernetAddressToEUI64(linkAddr tcpip.LinkAddress) [8]byte {
+	buf := [8]byte{}
+	EthernetAdddressToEUI64IntoBuf(linkAddr, buf[:])
+	return buf
+}
+
 // LinkLocalAddr computes the default IPv6 link-local address from a link-layer
 // (MAC) address.
 func LinkLocalAddr(linkAddr tcpip.LinkAddress) tcpip.Address {
@@ -276,17 +298,10 @@ func LinkLocalAddr(linkAddr tcpip.LinkAddress) tcpip.Address {
 	//	aa:bb:cc:dd:ee:ff => FE80::Aabb:ccFF:FEdd:eeff
 	// Note the capital A. The conversion aa->Aa involves a bit flip.
 	lladdrb := [16]byte{
-		0:  0xFE,
-		1:  0x80,
-		8:  linkAddr[0] ^ 2,
-		9:  linkAddr[1],
-		10: linkAddr[2],
-		11: 0xFF,
-		12: 0xFE,
-		13: linkAddr[3],
-		14: linkAddr[4],
-		15: linkAddr[5],
+		0: 0xFE,
+		1: 0x80,
 	}
+	EthernetAdddressToEUI64IntoBuf(linkAddr, lladdrb[8:])
 	return tcpip.Address(lladdrb[:])
 }
 
