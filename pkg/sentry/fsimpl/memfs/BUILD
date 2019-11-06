@@ -49,6 +49,7 @@ go_test(
     deps = [
         ":memfs",
         "//pkg/abi/linux",
+        "//pkg/refs",
         "//pkg/sentry/context",
         "//pkg/sentry/context/contexttest",
         "//pkg/sentry/fs",

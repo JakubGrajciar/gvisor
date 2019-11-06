@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/refs"
 	"gvisor.dev/gvisor/pkg/sentry/context"
 	"gvisor.dev/gvisor/pkg/sentry/context/contexttest"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
@@ -160,6 +161,8 @@ func BenchmarkVFS1TmpfsStat(b *testing.B) {
 					b.Fatalf("stat(%q) failed: %v", filePath, err)
 				}
 			}
+			// Don't include deferred cleanup in benchmark time.
+			b.StopTimer()
 		})
 	}
 }
@@ -173,10 +176,11 @@ func BenchmarkVFS2MemfsStat(b *testing.B) {
 			// Create VFS.
 			vfsObj := vfs.New()
 			vfsObj.MustRegisterFilesystemType("memfs", memfs.FilesystemType{})
-			mntns, err := vfsObj.NewMountNamespace(ctx, creds, "", "memfs", &vfs.NewFilesystemOptions{})
+			mntns, err := vfsObj.NewMountNamespace(ctx, creds, "", "memfs", &vfs.GetFilesystemOptions{})
 			if err != nil {
 				b.Fatalf("failed to create tmpfs root mount: %v", err)
 			}
+			defer mntns.DecRef(vfsObj)
 
 			var filePathBuilder strings.Builder
 			filePathBuilder.WriteByte('/')
@@ -186,7 +190,6 @@ func BenchmarkVFS2MemfsStat(b *testing.B) {
 			defer root.DecRef()
 			vd := root
 			vd.IncRef()
-			defer vd.DecRef()
 			for i := depth; i > 0; i-- {
 				name := fmt.Sprintf("%d", i)
 				pop := vfs.PathOperation{
@@ -219,6 +222,7 @@ func BenchmarkVFS2MemfsStat(b *testing.B) {
 				Flags: linux.O_RDWR | linux.O_CREAT | linux.O_EXCL,
 				Mode:  0644,
 			})
+			vd.DecRef()
 			if err != nil {
 				b.Fatalf("failed to create file %q: %v", filename, err)
 			}
@@ -243,6 +247,8 @@ func BenchmarkVFS2MemfsStat(b *testing.B) {
 					b.Fatalf("got wrong permissions (%0o)", stat.Mode)
 				}
 			}
+			// Don't include deferred cleanup in benchmark time.
+			b.StopTimer()
 		})
 	}
 }
@@ -343,6 +349,8 @@ func BenchmarkVFS1TmpfsMountStat(b *testing.B) {
 					b.Fatalf("stat(%q) failed: %v", filePath, err)
 				}
 			}
+			// Don't include deferred cleanup in benchmark time.
+			b.StopTimer()
 		})
 	}
 }
@@ -356,10 +364,11 @@ func BenchmarkVFS2MemfsMountStat(b *testing.B) {
 			// Create VFS.
 			vfsObj := vfs.New()
 			vfsObj.MustRegisterFilesystemType("memfs", memfs.FilesystemType{})
-			mntns, err := vfsObj.NewMountNamespace(ctx, creds, "", "memfs", &vfs.NewFilesystemOptions{})
+			mntns, err := vfsObj.NewMountNamespace(ctx, creds, "", "memfs", &vfs.GetFilesystemOptions{})
 			if err != nil {
 				b.Fatalf("failed to create tmpfs root mount: %v", err)
 			}
+			defer mntns.DecRef(vfsObj)
 
 			var filePathBuilder strings.Builder
 			filePathBuilder.WriteByte('/')
@@ -384,7 +393,7 @@ func BenchmarkVFS2MemfsMountStat(b *testing.B) {
 			}
 			defer mountPoint.DecRef()
 			// Create and mount the submount.
-			if err := vfsObj.NewMount(ctx, creds, "", &pop, "memfs", &vfs.NewFilesystemOptions{}); err != nil {
+			if err := vfsObj.NewMount(ctx, creds, "", &pop, "memfs", &vfs.GetFilesystemOptions{}); err != nil {
 				b.Fatalf("failed to mount tmpfs submount: %v", err)
 			}
 			filePathBuilder.WriteString(mountPointName)
@@ -395,7 +404,6 @@ func BenchmarkVFS2MemfsMountStat(b *testing.B) {
 			if err != nil {
 				b.Fatalf("failed to walk to mount root: %v", err)
 			}
-			defer vd.DecRef()
 			for i := depth; i > 0; i-- {
 				name := fmt.Sprintf("%d", i)
 				pop := vfs.PathOperation{
@@ -435,6 +443,7 @@ func BenchmarkVFS2MemfsMountStat(b *testing.B) {
 				Flags: linux.O_RDWR | linux.O_CREAT | linux.O_EXCL,
 				Mode:  0644,
 			})
+			vd.DecRef()
 			if err != nil {
 				b.Fatalf("failed to create file %q: %v", filename, err)
 			}
@@ -459,6 +468,14 @@ func BenchmarkVFS2MemfsMountStat(b *testing.B) {
 					b.Fatalf("got wrong permissions (%0o)", stat.Mode)
 				}
 			}
+			// Don't include deferred cleanup in benchmark time.
+			b.StopTimer()
 		})
 	}
+}
+
+func init() {
+	// Turn off reference leak checking for a fair comparison between vfs1 and
+	// vfs2.
+	refs.SetLeakMode(refs.NoLeakChecking)
 }

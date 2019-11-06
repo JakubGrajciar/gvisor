@@ -16,9 +16,14 @@
 //
 // Lock order:
 //
-// Filesystem implementation locks
+// FilesystemImpl/FileDescriptionImpl locks
 //   VirtualFilesystem.mountMu
+//     Dentry.mu
+//       Locks acquired by FilesystemImpls between Prepare{Delete,Rename}Dentry and Commit{Delete,Rename*}Dentry
 // VirtualFilesystem.fsTypesMu
+//
+// Locking Dentry.mu in multiple Dentries requires holding
+// VirtualFilesystem.mountMu.
 package vfs
 
 import (
@@ -33,7 +38,7 @@ type VirtualFilesystem struct {
 	// mountMu serializes mount mutations.
 	//
 	// mountMu is analogous to Linux's namespace_sem.
-	mountMu sync.RWMutex
+	mountMu sync.Mutex
 
 	// mounts maps (mount parent, mount point) pairs to mounts. (Since mounts
 	// are uniquely namespaced, including mount parent in the key correctly
@@ -52,7 +57,7 @@ type VirtualFilesystem struct {
 	// mountpoints maps mount points to mounts at those points in all
 	// namespaces. mountpoints is protected by mountMu.
 	//
-	// mountpoints is used to find mounts that must be unmounted due to
+	// mountpoints is used to find mounts that must be umounted due to
 	// removal of a mount point Dentry from another mount namespace. ("A file
 	// or directory that is a mount point in one namespace that is not a mount
 	// point in another namespace, may be renamed, unlinked, or removed
@@ -111,15 +116,15 @@ func (vd VirtualDentry) Ok() bool {
 // IncRef increments the reference counts on the Mount and Dentry represented
 // by vd.
 func (vd VirtualDentry) IncRef() {
-	vd.mount.incRef()
-	vd.dentry.incRef(vd.mount.fs)
+	vd.mount.IncRef()
+	vd.dentry.IncRef()
 }
 
 // DecRef decrements the reference counts on the Mount and Dentry represented
 // by vd.
 func (vd VirtualDentry) DecRef() {
-	vd.dentry.decRef(vd.mount.fs)
-	vd.mount.decRef()
+	vd.dentry.DecRef()
+	vd.mount.DecRef()
 }
 
 // Mount returns the Mount associated with vd. It does not take a reference on
