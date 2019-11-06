@@ -800,6 +800,11 @@ func (e *endpoint) handleClose() *tcpip.Error {
 // indicating that the connection is being reset due to receiving a RST. This
 // method must only be called from the protocol goroutine.
 func (e *endpoint) resetConnectionLocked(err *tcpip.Error) {
+	// Do nothing if we are already closed or already are in an error state.
+	if e.state == StateClose || e.state == StateError {
+		return
+	}
+
 	// Only send a reset if the connection is being aborted for a reason
 	// other than receiving a reset.
 	if e.state == StateEstablished || e.state == StateCloseWait {

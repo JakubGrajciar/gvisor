@@ -598,6 +598,100 @@ func TestUserSuppliedMSSOnConnectV6(t *testing.T) {
 	}
 }
 
+// TestTCPAckBeforeAcceptV4 tests that once the 3-way handshake is complete,
+// peers can send data and expect a response within a reasonable ammount of time
+// without calling Accept on the listening endpoint first.
+//
+// This test uses IPv4.
+func TestTCPAckBeforeAcceptV4(t *testing.T) {
+	c := context.New(t, defaultMTU)
+	defer c.Cleanup()
+
+	c.Create(-1)
+
+	if err := c.EP.Bind(tcpip.FullAddress{Port: context.StackPort}); err != nil {
+		t.Fatal("Bind failed:", err)
+	}
+
+	if err := c.EP.Listen(10); err != nil {
+		t.Fatal("Listen failed:", err)
+	}
+
+	irs, iss := executeHandshake(t, c, context.TestPort, true)
+
+	// Send data before accepting the connection.
+	c.SendPacket([]byte{1, 2, 3, 4}, &context.Headers{
+		SrcPort: context.TestPort,
+		DstPort: context.StackPort,
+		Flags:   header.TCPFlagAck,
+		SeqNum:  irs + 1,
+		AckNum:  iss + 1,
+	})
+
+	// Receive ACK for the data we sent.
+	checker.IPv4(t, c.GetPacket(), checker.TCP(
+		checker.DstPort(context.TestPort),
+		checker.TCPFlags(header.TCPFlagAck),
+		checker.SeqNum(uint32(iss+1)),
+		checker.AckNum(uint32(irs+5))))
+
+	// Reset the connection.
+	c.SendPacket(nil, &context.Headers{
+		SrcPort: context.TestPort,
+		DstPort: context.StackPort,
+		Flags:   header.TCPFlagAck | header.TCPFlagRst,
+		SeqNum:  irs + 5,
+		AckNum:  iss + 1,
+	})
+}
+
+// TestTCPAckBeforeAcceptV6 tests that once the 3-way handshake is complete,
+// peers can send data and expect a response within a reasonable ammount of time
+// without calling Accept on the listening endpoint first.
+//
+// This test uses IPv6.
+func TestTCPAckBeforeAcceptV6(t *testing.T) {
+	c := context.New(t, defaultMTU)
+	defer c.Cleanup()
+
+	c.CreateV6Endpoint(true)
+
+	if err := c.EP.Bind(tcpip.FullAddress{Port: context.StackPort}); err != nil {
+		t.Fatal("Bind failed:", err)
+	}
+
+	if err := c.EP.Listen(10); err != nil {
+		t.Fatal("Listen failed:", err)
+	}
+
+	irs, iss := executeV6Handshake(t, c, context.TestPort, true)
+
+	// Send data before accepting the connection.
+	c.SendV6Packet([]byte{1, 2, 3, 4}, &context.Headers{
+		SrcPort: context.TestPort,
+		DstPort: context.StackPort,
+		Flags:   header.TCPFlagAck,
+		SeqNum:  irs + 1,
+		AckNum:  iss + 1,
+	})
+
+	// Receive ACK for the data we sent.
+	checker.IPv6(t, c.GetV6Packet(), checker.TCP(
+		checker.DstPort(context.TestPort),
+		checker.TCPFlags(header.TCPFlagAck),
+		checker.SeqNum(uint32(iss+1)),
+		checker.AckNum(uint32(irs+5))))
+
+	// Reset the connection.
+	c.SendV6Packet(nil, &context.Headers{
+		SrcPort: context.TestPort,
+		DstPort: context.StackPort,
+		Flags:   header.TCPFlagAck | header.TCPFlagRst,
+		SeqNum:  irs + 5,
+		AckNum:  iss + 1,
+	})
+}
+
 func TestTOSV4(t *testing.T) {
 	c := context.New(t, defaultMTU)
 	defer c.Cleanup()
@@ -4014,7 +4108,7 @@ func executeHandshake(t *testing.T, c *context.Context, srcPort uint16, synCooki
 		RcvWnd:  30000,
 	})
 
-	// Receive the SYN-ACK reply.w
+	// Receive the SYN-ACK reply.
 	b := c.GetPacket()
 	tcp := header.TCP(header.IPv4(b).Payload())
 	iss = seqnum.Value(tcp.SequenceNumber())
@@ -4037,6 +4131,50 @@ func executeHandshake(t *testing.T, c *context.Context, srcPort uint16, synCooki
 
 	// Send ACK.
 	c.SendPacket(nil, &context.Headers{
+		SrcPort: srcPort,
+		DstPort: context.StackPort,
+		Flags:   header.TCPFlagAck,
+		SeqNum:  irs + 1,
+		AckNum:  iss + 1,
+		RcvWnd:  30000,
+	})
+	return irs, iss
+}
+
+func executeV6Handshake(t *testing.T, c *context.Context, srcPort uint16, synCookieInUse bool) (irs, iss seqnum.Value) {
+	// Send a SYN request.
+	irs = seqnum.Value(789)
+	c.SendV6Packet(nil, &context.Headers{
+		SrcPort: srcPort,
+		DstPort: context.StackPort,
+		Flags:   header.TCPFlagSyn,
+		SeqNum:  irs,
+		RcvWnd:  30000,
+	})
+
+	// Receive the SYN-ACK reply.
+	b := c.GetV6Packet()
+	tcp := header.TCP(header.IPv6(b).Payload())
+	iss = seqnum.Value(tcp.SequenceNumber())
+	tcpCheckers := []checker.TransportChecker{
+		checker.SrcPort(context.StackPort),
+		checker.DstPort(srcPort),
+		checker.TCPFlags(header.TCPFlagAck | header.TCPFlagSyn),
+		checker.AckNum(uint32(irs) + 1),
+	}
+
+	if synCookieInUse {
+		// When cookies are in use window scaling is disabled.
+		tcpCheckers = append(tcpCheckers, checker.TCPSynOptions(header.TCPSynOptions{
+			WS:  -1,
+			MSS: c.MSSWithoutOptionsV6(),
+		}))
+	}
+
+	checker.IPv6(t, b, checker.TCP(tcpCheckers...))
+
+	// Send ACK.
+	c.SendV6Packet(nil, &context.Headers{
 		SrcPort: srcPort,
 		DstPort: context.StackPort,
 		Flags:   header.TCPFlagAck,

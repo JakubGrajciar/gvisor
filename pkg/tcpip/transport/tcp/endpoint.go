@@ -1923,12 +1923,9 @@ func (e *endpoint) Accept() (tcpip.Endpoint, *waiter.Queue, *tcpip.Error) {
 		return nil, nil, tcpip.ErrWouldBlock
 	}
 
-	// Start the protocol goroutine.
-	wq := &waiter.Queue{}
-	n.startAcceptedLoop(wq)
 	e.stack.Stats().TCP.PassiveConnectionOpenings.Increment()
 
-	return n, wq, nil
+	return n, n.waiterQueue, nil
 }
 
 // Bind binds the endpoint to a specific local port and optionally address.

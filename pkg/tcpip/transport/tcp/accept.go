@@ -343,6 +343,8 @@ func (e *endpoint) deliverAccepted(n *endpoint) {
 	acceptedChan := e.acceptedChan
 	e.mu.Unlock()
 	if state == StateListen {
+		n.startAcceptedLoop(&waiter.Queue{})
+
 		acceptedChan <- n
 		e.waiterQueue.Notify(waiter.EventIn)
 	} else {
