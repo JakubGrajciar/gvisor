@@ -21,6 +21,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/iptables"
+	"gvisor.dev/gvisor/pkg/tcpip/ports"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
@@ -89,20 +90,22 @@ type endpoint struct {
 	rcvClosed     bool
 
 	// The following fields are protected by the mu mutex.
-	mu             sync.RWMutex `state:"nosave"`
-	sndBufSize     int
-	state          EndpointState
-	route          stack.Route `state:"manual"`
-	dstPort        uint16
-	v6only         bool
-	ttl            uint8
-	multicastTTL   uint8
-	multicastAddr  tcpip.Address
-	multicastNICID tcpip.NICID
-	multicastLoop  bool
-	reusePort      bool
-	bindToDevice   tcpip.NICID
-	broadcast      bool
+	mu                sync.RWMutex `state:"nosave"`
+	sndBufSize        int
+	state             EndpointState
+	route             stack.Route `state:"manual"`
+	dstPort           uint16
+	v6only            bool
+	ttl               uint8
+	multicastTTL      uint8
+	multicastAddr     tcpip.Address
+	multicastNICID    tcpip.NICID
+	multicastLoop     bool
+	reusePort         bool
+	bindToDevice      tcpip.NICID
+	broadcast         bool
+	boundBindToDevice tcpip.NICID
+	boundPortFlags    ports.Flags
 
 	// sendTOS represents IPv4 TOS or IPv6 TrafficClass,
 	// applied while sending packets. Defaults to 0 as on Linux.
@@ -175,8 +178,10 @@ func (e *endpoint) Close() {
 
 	switch e.state {
 	case StateBound, StateConnected:
-		e.stack.UnregisterTransportEndpoint(e.RegisterNICID, e.effectiveNetProtos, ProtocolNumber, e.ID, e, e.bindToDevice)
-		e.stack.ReleasePort(e.effectiveNetProtos, ProtocolNumber, e.ID.LocalAddress, e.ID.LocalPort, e.bindToDevice)
+		e.stack.UnregisterTransportEndpoint(e.RegisterNICID, e.effectiveNetProtos, ProtocolNumber, e.ID, e, e.boundBindToDevice)
+		e.stack.ReleasePort(e.effectiveNetProtos, ProtocolNumber, e.ID.LocalAddress, e.ID.LocalPort, e.boundPortFlags, e.boundBindToDevice)
+		e.boundBindToDevice = 0
+		e.boundPortFlags = ports.Flags{}
 	}
 
 	for _, mem := range e.multicastMemberships {
@@ -886,12 +891,14 @@ func (e *endpoint) Disconnect() *tcpip.Error {
 	} else {
 		if e.ID.LocalPort != 0 {
 			// Release the ephemeral port.
-			e.stack.ReleasePort(e.effectiveNetProtos, ProtocolNumber, e.ID.LocalAddress, e.ID.LocalPort, e.bindToDevice)
+			e.stack.ReleasePort(e.effectiveNetProtos, ProtocolNumber, e.ID.LocalAddress, e.ID.LocalPort, e.boundPortFlags, e.boundBindToDevice)
+			e.boundBindToDevice = 0
+			e.boundPortFlags = ports.Flags{}
 		}
 		e.state = StateInitial
 	}
 
-	e.stack.UnregisterTransportEndpoint(e.RegisterNICID, e.effectiveNetProtos, ProtocolNumber, e.ID, e, e.bindToDevice)
+	e.stack.UnregisterTransportEndpoint(e.RegisterNICID, e.effectiveNetProtos, ProtocolNumber, e.ID, e, e.boundBindToDevice)
 	e.ID = id
 	e.route.Release()
 	e.route = stack.Route{}
@@ -968,7 +975,7 @@ func (e *endpoint) Connect(addr tcpip.FullAddress) *tcpip.Error {
 
 	// Remove the old registration.
 	if e.ID.LocalPort != 0 {
-		e.stack.UnregisterTransportEndpoint(e.RegisterNICID, e.effectiveNetProtos, ProtocolNumber, e.ID, e, e.bindToDevice)
+		e.stack.UnregisterTransportEndpoint(e.RegisterNICID, e.effectiveNetProtos, ProtocolNumber, e.ID, e, e.boundBindToDevice)
 	}
 
 	e.ID = id
@@ -1031,16 +1038,25 @@ func (*endpoint) Accept() (tcpip.Endpoint, *waiter.Queue, *tcpip.Error) {
 
 func (e *endpoint) registerWithStack(nicID tcpip.NICID, netProtos []tcpip.NetworkProtocolNumber, id stack.TransportEndpointID) (stack.TransportEndpointID, *tcpip.Error) {
 	if e.ID.LocalPort == 0 {
-		port, err := e.stack.ReservePort(netProtos, ProtocolNumber, id.LocalAddress, id.LocalPort, e.reusePort, e.bindToDevice)
+		flags := ports.Flags{
+			LoadBalanced: e.reusePort,
+			// FIXME(b/129164367): Support SO_REUSEADDR.
+			MostRecent: false,
+		}
+		port, err := e.stack.ReservePort(netProtos, ProtocolNumber, id.LocalAddress, id.LocalPort, flags, e.bindToDevice)
 		if err != nil {
 			return id, err
 		}
+		e.boundBindToDevice = e.bindToDevice
+		e.boundPortFlags = flags
 		id.LocalPort = port
 	}
 
-	err := e.stack.RegisterTransportEndpoint(nicID, netProtos, ProtocolNumber, id, e, e.reusePort, e.bindToDevice)
+	err := e.stack.RegisterTransportEndpoint(nicID, netProtos, ProtocolNumber, id, e, e.reusePort, e.boundBindToDevice)
 	if err != nil {
-		e.stack.ReleasePort(netProtos, ProtocolNumber, id.LocalAddress, id.LocalPort, e.bindToDevice)
+		e.stack.ReleasePort(netProtos, ProtocolNumber, id.LocalAddress, id.LocalPort, e.boundPortFlags, e.boundBindToDevice)
+		e.boundBindToDevice = 0
+		e.boundPortFlags = ports.Flags{}
 	}
 	return id, err
 }
