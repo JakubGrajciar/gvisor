@@ -1,14 +1,20 @@
-load("//tools/go_stateify:defs.bzl", "go_library")
 load("@io_bazel_rules_go//go:def.bzl", "go_test")
+load("//tools/go_stateify:defs.bzl", "go_library")
 load("//tools/go_generics:defs.bzl", "go_template", "go_template_instance")
 
 package(licenses = ["notice"])
 
+config_setting(
+    name = "aarch64",
+    values = {"cpu": "aarch64"},
+)
+
 go_template(
     name = "generic_walker",
-    srcs = [
-        "walker_amd64.go",
-    ],
+    srcs = select({
+        ":aarch64": ["walker_arm64.go"],
+        "//conditions:default": ["walker_amd64.go"],
+    }),
     opt_types = [
         "Visitor",
     ],
@@ -76,9 +82,13 @@ go_library(
         "allocator.go",
         "allocator_unsafe.go",
         "pagetables.go",
+        "pagetables_aarch64.go",
         "pagetables_amd64.go",
+        "pagetables_arm64.go",
         "pagetables_x86.go",
         "pcids_x86.go",
+        "walker_amd64.go",
+        "walker_arm64.go",
         "walker_empty.go",
         "walker_lookup.go",
         "walker_map.go",
@@ -97,6 +107,7 @@ go_test(
     size = "small",
     srcs = [
         "pagetables_amd64_test.go",
+        "pagetables_arm64_test.go",
         "pagetables_test.go",
         "walker_check.go",
     ],
