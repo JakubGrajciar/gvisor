@@ -40,7 +40,7 @@ type SimpleFileInode struct {
 	InodeNotOpenable          `state:"nosave"`
 	InodeNotSocket            `state:"nosave"`
 	InodeNotSymlink           `state:"nosave"`
-	InodeNotTruncatable       `state:"nosave"`
+	InodeNoopTruncate         `state:"nosave"`
 	InodeNotVirtual           `state:"nosave"`
 
 	InodeSimpleAttributes
