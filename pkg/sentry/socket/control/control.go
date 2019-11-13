@@ -23,9 +23,11 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
+	"gvisor.dev/gvisor/pkg/sentry/socket"
 	"gvisor.dev/gvisor/pkg/sentry/socket/unix/transport"
 	"gvisor.dev/gvisor/pkg/sentry/usermem"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/tcpip"
 )
 
 const maxInt = int(^uint(0) >> 1)
@@ -320,35 +322,91 @@ func PackInq(t *kernel.Task, inq int32, buf []byte) []byte {
 		buf,
 		linux.SOL_TCP,
 		linux.TCP_INQ,
-		4,
+		t.Arch().Width(),
 		inq,
 	)
 }
 
+// PackTos packs a IP_TOS socket control message.
+func PackTos(t *kernel.Task, tos int8, buf []byte) []byte {
+	return putCmsgStruct(
+		buf,
+		linux.SOL_IP,
+		linux.IP_TOS,
+		t.Arch().Width(),
+		tos,
+	)
+}
+
+// PackTclass packs a IPV6_TCLASS socket control message.
+func PackTclass(t *kernel.Task, tclass int32, buf []byte) []byte {
+	return putCmsgStruct(
+		buf,
+		linux.SOL_IPV6,
+		linux.IPV6_TCLASS,
+		t.Arch().Width(),
+		tclass,
+	)
+}
+
+func addSpaceForCmsg(buf []byte, cmsgDataLen int) []byte {
+	newBuf := make([]byte, 0, len(buf)+linux.SizeOfControlMessageHeader+cmsgDataLen)
+	return append(newBuf, buf...)
+}
+
+// PackControlMessages converts the given ControlMessages struct into a buffer. We skip Unix control messages because they are not all supported by the hostinet socket interface.
+func PackControlMessages(t *kernel.Task, cmsgs socket.ControlMessages) []byte {
+	var buf []byte
+	// The use of t.Arch().Width() is analogous to Linux's use of
+	// sizeof(long) in CMSG_ALIGN.
+	width := t.Arch().Width()
+
+	if cmsgs.IP.HasTimestamp {
+		buf = addSpaceForCmsg(buf, int(width))
+		buf = PackTimestamp(t, cmsgs.IP.Timestamp, buf)
+	}
+	if cmsgs.IP.HasInq {
+		// In Linux, TCP_CM_INQ is added after SO_TIMESTAMP.
+		buf = addSpaceForCmsg(buf, AlignUp(tcpip.SizeOfInq, width))
+		buf = PackInq(t, cmsgs.IP.Inq, buf)
+	}
+	if cmsgs.IP.HasTos {
+		buf = addSpaceForCmsg(buf, AlignUp(tcpip.SizeOfTos, width))
+		buf = PackTos(t, cmsgs.IP.Tos, buf)
+	}
+	if cmsgs.IP.HasTclass {
+		buf = addSpaceForCmsg(buf, AlignUp(tcpip.SizeOfTclass, width))
+		buf = PackTclass(t, cmsgs.IP.Tclass, buf)
+	}
+
+	return buf
+}
+
 // Parse parses a raw socket control message into portable objects.
-func Parse(t *kernel.Task, socketOrEndpoint interface{}, buf []byte) (transport.ControlMessages, error) {
+func Parse(t *kernel.Task, socketOrEndpoint interface{}, buf []byte) (socket.ControlMessages, error) {
 	var (
 		fds       linux.ControlMessageRights
-		haveCreds bool
+		hasCreds  bool
 		creds     linux.ControlMessageCredentials
+		hasTos    bool
+		tos       int8
+		hasTclass bool
+		tclass    int32
 	)
 
 	for i := 0; i < len(buf); {
 		if i+linux.SizeOfControlMessageHeader > len(buf) {
-			return transport.ControlMessages{}, syserror.EINVAL
+			return socket.ControlMessages{}, syserror.EINVAL
 		}
 
 		var h linux.ControlMessageHeader
 		binary.Unmarshal(buf[i:i+linux.SizeOfControlMessageHeader], usermem.ByteOrder, &h)
 
 		if h.Length < uint64(linux.SizeOfControlMessageHeader) {
-			return transport.ControlMessages{}, syserror.EINVAL
+			return socket.ControlMessages{}, syserror.EINVAL
 		}
 		if h.Length > uint64(len(buf)-i) {
-			return transport.ControlMessages{}, syserror.EINVAL
-		}
-		if h.Level != linux.SOL_SOCKET {
-			return transport.ControlMessages{}, syserror.EINVAL
+			return socket.ControlMessages{}, syserror.EINVAL
 		}
 
 		i += linux.SizeOfControlMessageHeader
@@ -358,41 +416,64 @@ func Parse(t *kernel.Task, socketOrEndpoint interface{}, buf []byte) (transport.
 		// sizeof(long) in CMSG_ALIGN.
 		width := t.Arch().Width()
 
-		switch h.Type {
-		case linux.SCM_RIGHTS:
-			rightsSize := AlignDown(length, linux.SizeOfControlMessageRight)
-			numRights := rightsSize / linux.SizeOfControlMessageRight
+		switch h.Level {
+		case linux.SOL_SOCKET:
+			switch h.Type {
+			case linux.SCM_RIGHTS:
+				rightsSize := AlignDown(length, linux.SizeOfControlMessageRight)
+				numRights := rightsSize / linux.SizeOfControlMessageRight
 
-			if len(fds)+numRights > linux.SCM_MAX_FD {
-				return transport.ControlMessages{}, syserror.EINVAL
+				if len(fds)+numRights > linux.SCM_MAX_FD {
+					return socket.ControlMessages{}, syserror.EINVAL
+				}
+
+				for j := i; j < i+rightsSize; j += linux.SizeOfControlMessageRight {
+					fds = append(fds, int32(usermem.ByteOrder.Uint32(buf[j:j+linux.SizeOfControlMessageRight])))
+				}
+
+				i += AlignUp(length, width)
+
+			case linux.SCM_CREDENTIALS:
+				if length < linux.SizeOfControlMessageCredentials {
+					return socket.ControlMessages{}, syserror.EINVAL
+				}
+
+				binary.Unmarshal(buf[i:i+linux.SizeOfControlMessageCredentials], usermem.ByteOrder, &creds)
+				hasCreds = true
+				i += AlignUp(length, width)
+
+			default:
+				// Unknown message type.
+				return socket.ControlMessages{}, syserror.EINVAL
 			}
-
-			for j := i; j < i+rightsSize; j += linux.SizeOfControlMessageRight {
-				fds = append(fds, int32(usermem.ByteOrder.Uint32(buf[j:j+linux.SizeOfControlMessageRight])))
+		case linux.SOL_IP:
+			switch h.Type {
+			case linux.IP_TOS:
+				binary.Unmarshal(buf[i:i+tcpip.SizeOfTos], usermem.ByteOrder, &tos)
+				hasTos = true
+				i += AlignUp(length, width)
+			default:
+				return socket.ControlMessages{}, syserror.EINVAL
 			}
-
-			i += AlignUp(length, width)
-
-		case linux.SCM_CREDENTIALS:
-			if length < linux.SizeOfControlMessageCredentials {
-				return transport.ControlMessages{}, syserror.EINVAL
+		case linux.SOL_IPV6:
+			switch h.Type {
+			case linux.IPV6_TCLASS:
+				binary.Unmarshal(buf[i:i+tcpip.SizeOfTclass], usermem.ByteOrder, &tclass)
+				hasTclass = true
+				i += AlignUp(length, width)
+			default:
+				return socket.ControlMessages{}, syserror.EINVAL
 			}
-
-			binary.Unmarshal(buf[i:i+linux.SizeOfControlMessageCredentials], usermem.ByteOrder, &creds)
-			haveCreds = true
-			i += AlignUp(length, width)
-
 		default:
-			// Unknown message type.
-			return transport.ControlMessages{}, syserror.EINVAL
+			return socket.ControlMessages{}, syserror.EINVAL
 		}
 	}
 
 	var credentials SCMCredentials
-	if haveCreds {
+	if hasCreds {
 		var err error
 		if credentials, err = NewSCMCredentials(t, creds); err != nil {
-			return transport.ControlMessages{}, err
+			return socket.ControlMessages{}, err
 		}
 	} else {
 		credentials = makeCreds(t, socketOrEndpoint)
@@ -402,15 +483,15 @@ func Parse(t *kernel.Task, socketOrEndpoint interface{}, buf []byte) (transport.
 	if len(fds) > 0 {
 		var err error
 		if rights, err = NewSCMRights(t, fds); err != nil {
-			return transport.ControlMessages{}, err
+			return socket.ControlMessages{}, err
 		}
 	}
 
-	if credentials == nil && rights == nil {
-		return transport.ControlMessages{}, nil
+	parsedCmsgs := socket.ControlMessages{
+		transport.ControlMessages{Credentials: credentials, Rights: rights},
+		tcpip.ControlMessages{HasTos: hasTos, Tos: tos, HasTclass: hasTclass, Tclass: tclass},
 	}
-
-	return transport.ControlMessages{Credentials: credentials, Rights: rights}, nil
+	return parsedCmsgs, nil
 }
 
 func makeCreds(t *kernel.Task, socketOrEndpoint interface{}) SCMCredentials {

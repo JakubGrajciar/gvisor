@@ -790,7 +790,6 @@ func recvSingleMsg(t *kernel.Task, s socket.Socket, msgPtr usermem.Addr, flags i
 		return 0, syserror.ConvertIntr(e.ToError(), kernel.ERESTARTSYS)
 	}
 	defer cms.Unix.Release()
-
 	controlData := make([]byte, 0, msg.ControlLen)
 
 	if cr, ok := s.(transport.Credentialer); ok && cr.Passcred() {
@@ -805,6 +804,13 @@ func recvSingleMsg(t *kernel.Task, s socket.Socket, msgPtr usermem.Addr, flags i
 	if cms.IP.HasInq {
 		// In Linux, TCP_CM_INQ is added after SO_TIMESTAMP.
 		controlData = control.PackInq(t, cms.IP.Inq, controlData)
+	}
+
+	if cms.IP.HasTos {
+		controlData = control.PackTos(t, cms.IP.Tos, controlData)
+	}
+	if cms.IP.HasTclass {
+		controlData = control.PackTclass(t, cms.IP.Tclass, controlData)
 	}
 
 	if cms.Unix.Rights != nil {
@@ -1065,10 +1071,10 @@ func sendSingleMsg(t *kernel.Task, s socket.Socket, file *fs.File, msgPtr userme
 	}
 
 	// Call the syscall implementation.
-	n, e := s.SendMsg(t, src, to, int(flags), haveDeadline, deadline, socket.ControlMessages{Unix: controlMessages})
+	n, e := s.SendMsg(t, src, to, int(flags), haveDeadline, deadline, controlMessages)
 	err = handleIOError(t, n != 0, e.ToError(), kernel.ERESTARTSYS, "sendmsg", file)
 	if err != nil {
-		controlMessages.Release()
+		controlMessages.Unix.Release()
 	}
 	return uintptr(n), err
 }
