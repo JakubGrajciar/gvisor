@@ -339,7 +339,8 @@ type endpoint struct {
 	isConnectNotified bool
 	// TCP should never broadcast but Linux nevertheless supports enabling/
 	// disabling SO_BROADCAST, albeit as a NOOP.
-	broadcast bool
+	broadcast         bool
+	boundBindToDevice tcpip.NICID
 
 	// effectiveNetProtos contains the network protocols actually in use. In
 	// most cases it will only contain "netProto", but in cases like IPv6
@@ -730,12 +731,13 @@ func (e *endpoint) Close() {
 	// in Listen() when trying to register.
 	if e.state == StateListen && e.isPortReserved {
 		if e.isRegistered {
-			e.stack.StartTransportEndpointCleanup(e.boundNICID, e.effectiveNetProtos, ProtocolNumber, e.ID, e, e.bindToDevice)
+			e.stack.StartTransportEndpointCleanup(e.boundNICID, e.effectiveNetProtos, ProtocolNumber, e.ID, e, e.boundBindToDevice)
 			e.isRegistered = false
 		}
 
-		e.stack.ReleasePort(e.effectiveNetProtos, ProtocolNumber, e.ID.LocalAddress, e.ID.LocalPort, e.bindToDevice)
+		e.stack.ReleasePort(e.effectiveNetProtos, ProtocolNumber, e.ID.LocalAddress, e.ID.LocalPort, e.boundBindToDevice)
 		e.isPortReserved = false
+		e.boundBindToDevice = 0
 	}
 
 	// Mark endpoint as closed.
@@ -791,13 +793,14 @@ func (e *endpoint) cleanupLocked() {
 	e.workerCleanup = false
 
 	if e.isRegistered {
-		e.stack.StartTransportEndpointCleanup(e.boundNICID, e.effectiveNetProtos, ProtocolNumber, e.ID, e, e.bindToDevice)
+		e.stack.StartTransportEndpointCleanup(e.boundNICID, e.effectiveNetProtos, ProtocolNumber, e.ID, e, e.boundBindToDevice)
 		e.isRegistered = false
 	}
 
 	if e.isPortReserved {
-		e.stack.ReleasePort(e.effectiveNetProtos, ProtocolNumber, e.ID.LocalAddress, e.ID.LocalPort, e.bindToDevice)
+		e.stack.ReleasePort(e.effectiveNetProtos, ProtocolNumber, e.ID.LocalAddress, e.ID.LocalPort, e.boundBindToDevice)
 		e.isPortReserved = false
+		e.boundBindToDevice = 0
 	}
 
 	e.route.Release()
@@ -1741,7 +1744,7 @@ func (e *endpoint) connect(addr tcpip.FullAddress, handshake bool, run bool) *tc
 
 	if e.ID.LocalPort != 0 {
 		// The endpoint is bound to a port, attempt to register it.
-		err := e.stack.RegisterTransportEndpoint(nicID, netProtos, ProtocolNumber, e.ID, e, e.reusePort, e.bindToDevice)
+		err := e.stack.RegisterTransportEndpoint(nicID, netProtos, ProtocolNumber, e.ID, e, e.reusePort, e.boundBindToDevice)
 		if err != nil {
 			return err
 		}
@@ -1779,6 +1782,7 @@ func (e *endpoint) connect(addr tcpip.FullAddress, handshake bool, run bool) *tc
 			switch e.stack.RegisterTransportEndpoint(nicID, netProtos, ProtocolNumber, id, e, e.reusePort, e.bindToDevice) {
 			case nil:
 				e.ID = id
+				e.boundBindToDevice = e.bindToDevice
 				return true, nil
 			case tcpip.ErrPortInUse:
 				return false, nil
@@ -1794,8 +1798,9 @@ func (e *endpoint) connect(addr tcpip.FullAddress, handshake bool, run bool) *tc
 	// before Connect: in such a case we don't want to hold on to
 	// reservations anymore.
 	if e.isPortReserved {
-		e.stack.ReleasePort(e.effectiveNetProtos, ProtocolNumber, origID.LocalAddress, origID.LocalPort, e.bindToDevice)
+		e.stack.ReleasePort(e.effectiveNetProtos, ProtocolNumber, origID.LocalAddress, origID.LocalPort, e.boundBindToDevice)
 		e.isPortReserved = false
+		e.boundBindToDevice = 0
 	}
 
 	e.isRegistered = true
@@ -1950,7 +1955,7 @@ func (e *endpoint) listen(backlog int) *tcpip.Error {
 	}
 
 	// Register the endpoint.
-	if err := e.stack.RegisterTransportEndpoint(e.boundNICID, e.effectiveNetProtos, ProtocolNumber, e.ID, e, e.reusePort, e.bindToDevice); err != nil {
+	if err := e.stack.RegisterTransportEndpoint(e.boundNICID, e.effectiveNetProtos, ProtocolNumber, e.ID, e, e.reusePort, e.boundBindToDevice); err != nil {
 		return err
 	}
 
@@ -2031,6 +2036,7 @@ func (e *endpoint) Bind(addr tcpip.FullAddress) (err *tcpip.Error) {
 		return err
 	}
 
+	e.boundBindToDevice = e.bindToDevice
 	e.isPortReserved = true
 	e.effectiveNetProtos = netProtos
 	e.ID.LocalPort = port
@@ -2044,8 +2050,9 @@ func (e *endpoint) Bind(addr tcpip.FullAddress) (err *tcpip.Error) {
 			e.ID.LocalPort = 0
 			e.ID.LocalAddress = ""
 			e.boundNICID = 0
+			e.boundBindToDevice = 0
 		}
-	}(e.bindToDevice)
+	}(e.boundBindToDevice)
 
 	// If an address is specified, we must ensure that it's one of our
 	// local addresses.
