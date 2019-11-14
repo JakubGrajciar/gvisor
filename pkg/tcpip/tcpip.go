@@ -308,7 +308,7 @@ type ControlMessages struct {
 	// HasTimestamp indicates whether Timestamp is valid/set.
 	HasTimestamp bool
 
-	// Timestamp is the time (in ns) that the last packed used to create
+	// Timestamp is the time (in ns) that the last packet used to create
 	// the read data was received.
 	Timestamp int64
 
@@ -317,7 +317,31 @@ type ControlMessages struct {
 
 	// Inq is the number of bytes ready to be received.
 	Inq int32
+
+	// HasTos indicates whether Tos is valid/set.
+	HasTos bool
+
+	// Tos is the IPV4 type of service of the associated packet.
+	Tos int8
+
+	// HasTclass indicates whether Tclass is valid/set.
+	HasTclass bool
+
+	// Tclass is the IPV6 traffic class of the associated packet.
+	Tclass int32
 }
+
+// SizeOfTimestamp is the size of ControlMessages.Timestamp in bytes.
+var SizeOfTimestamp = 8
+
+// SizeOfInq is the size of ControlMessages.Inq in bytes.
+var SizeOfInq = 4
+
+// SizeOfTos is the size of ControlMessages.Tos in bytes.
+var SizeOfTos = 1
+
+// SizeOfTclass is the size of ControlMessages.Tclass in bytes.
+var SizeOfTclass = 4
 
 // Endpoint is the interface implemented by transport protocols (e.g., tcp, udp)
 // that exposes functionality like read, write, connect, etc. to users of the
