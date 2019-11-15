@@ -13,12 +13,13 @@
 // limitations under the License.
 
 #include <arpa/inet.h>
-#include <linux/tcp.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <string.h>
+#ifdef __linux__
 #include <sys/epoll.h>
-#include <sys/socket.h>
+#endif
 
 #include <atomic>
 #include <iostream>
@@ -853,6 +854,7 @@ TEST_P(SocketInetReusePortTest, UdpPortReuseMultiThread) {
                 EquivalentWithin((kConnectAttempts / kThreadCount), 0.10));
 }
 
+#ifdef __linux__
 TEST_P(SocketInetReusePortTest, UdpPortReuseMultiThreadShort) {
   auto const& param = GetParam();
 
@@ -958,6 +960,7 @@ TEST_P(SocketInetReusePortTest, UdpPortReuseMultiThreadShort) {
     }
   }
 }
+#endif
 
 INSTANTIATE_TEST_SUITE_P(
     All, SocketInetReusePortTest,
@@ -1841,7 +1844,7 @@ TEST_P(SocketMultiProtocolInetLoopbackTest, NoReusePortFollowingReusePort) {
 }
 
 INSTANTIATE_TEST_SUITE_P(
-    AllFamlies, SocketMultiProtocolInetLoopbackTest,
+    AllFamilies, SocketMultiProtocolInetLoopbackTest,
     ::testing::Values(ProtocolTestParam{"TCP", SOCK_STREAM},
                       ProtocolTestParam{"UDP", SOCK_DGRAM}),
     DescribeProtocolTestParam);
