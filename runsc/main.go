@@ -82,6 +82,8 @@ var (
 	rootless           = flag.Bool("rootless", false, "it allows the sandbox to be started with a user that is not root. Sandbox and Gofer processes may run with same privileges as current user.")
 	referenceLeakMode  = flag.String("ref-leak-mode", "disabled", "sets reference leak check mode: disabled (default), log-names, log-traces.")
 
+	memifSocketFile    = flag.String("memif-socket-file", "/run/vpp/memif.sock", "memif socket file path")
+
 	// Test flags, not to be used outside tests, ever.
 	testOnlyAllowRunAsCurrentUserWithoutChroot = flag.Bool("TESTONLY-unsafe-nonroot", false, "TEST ONLY; do not ever use! This skips many security measures that isolate the host from the sandbox.")
 	testOnlyTestNameEnv                        = flag.String("TESTONLY-test-name-env", "", "TEST ONLY; do not ever use! Used for automated tests to improve logging.")
@@ -224,6 +226,7 @@ func main() {
 		AlsoLogToStderr:    *alsoLogToStderr,
 		ReferenceLeakMode:  refsLeakMode,
 		OverlayfsStaleRead: *overlayfsStaleRead,
+		MemifSocketFile:     *memifSocketFile,
 
 		TestOnlyAllowRunAsCurrentUserWithoutChroot: *testOnlyAllowRunAsCurrentUserWithoutChroot,
 		TestOnlyTestNameEnv:                        *testOnlyTestNameEnv,

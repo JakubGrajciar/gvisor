@@ -29,6 +29,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/urpc"
+	"gvisor.dev/gvisor/pkg/tcpip/link/memif"
 )
 
 // Network exposes methods that can be used to configure a network stack.
@@ -63,6 +64,30 @@ type FDBasedLink struct {
 	NumChannels int
 }
 
+// MemifLink configures an memif link.
+type MemifLink struct {
+	Name               string
+	// FIXME: provide id
+	// memory interface id (unique per control channel socket)
+	Id                 uint32
+	NumQueuePairs      uint16
+	Log2RingSize       uint8
+	PacketBufferSize   uint32
+
+	MTU                int
+	Addresses          []net.IP
+	Routes             []Route
+	GSOMaxSize         uint32
+	SoftwareGSOEnabled bool
+	LinkAddress        net.HardwareAddr
+	// FIXME: provide socket
+	// ControlChannel control channel socket file descriptor
+	ControlChannel int
+
+	/* FIXME: What's this? number of queues? */
+	NumChannels int
+}
+
 // LoopbackLink configures a loopback li nk.
 type LoopbackLink struct {
 	Name      string
@@ -79,6 +104,7 @@ type CreateLinksAndRoutesArgs struct {
 
 	LoopbackLinks []LoopbackLink
 	FDBasedLinks  []FDBasedLink
+	MemifLinks    []MemifLink
 
 	DefaultGateway DefaultRoute
 }
@@ -103,10 +129,19 @@ func (r *Route) toTcpipRoute(id tcpip.NICID) (tcpip.Route, error) {
 // CreateLinksAndRoutes creates links and routes in a network stack.  It should
 // only be called once.
 func (n *Network) CreateLinksAndRoutes(args *CreateLinksAndRoutesArgs, _ *struct{}) error {
+	// FIXME: DISABLE FOR NOW
+
 	wantFDs := 0
-	for _, l := range args.FDBasedLinks {
-		wantFDs += l.NumChannels
+	if len(args.FDBasedLinks) > 0 {
+		for _, l := range args.FDBasedLinks {
+			wantFDs += l.NumChannels
+		}
+	} else if len(args.MemifLinks) > 0 {
+		for _, l := range args.MemifLinks {
+			wantFDs += l.NumChannels
+		}
 	}
+
 	if got := len(args.FilePayload.Files); got != wantFDs {
 		return fmt.Errorf("args.FilePayload.Files has %d FD's but we need %d entries based on FDBasedLinks", got, wantFDs)
 	}
@@ -166,6 +201,53 @@ func (n *Network) CreateLinksAndRoutes(args *CreateLinksAndRoutesArgs, _ *struct
 			GSOMaxSize:         link.GSOMaxSize,
 			SoftwareGSOEnabled: link.SoftwareGSOEnabled,
 			RXChecksumOffload:  true,
+		})
+		if err != nil {
+			return err
+		}
+
+		log.Infof("Enabling interface %q with id %d on addresses %+v (%v) w/ %d channels", link.Name, nicID, link.Addresses, mac, link.NumChannels)
+		if err := n.createNICWithAddrs(nicID, link.Name, ep, link.Addresses, false /* loopback */); err != nil {
+			return err
+		}
+
+		// Collect the routes from this link.
+		for _, r := range link.Routes {
+			route, err := r.toTcpipRoute(nicID)
+			if err != nil {
+				return err
+			}
+			routes = append(routes, route)
+		}
+	}
+
+	for _, link := range args.MemifLinks {
+		nicID++
+		nicids[link.Name] = nicID
+
+		FDs := []int{}
+		for j := 0; j < link.NumChannels; j++ {
+			// Copy the underlying FD.
+			oldFD := args.FilePayload.Files[fdOffset].Fd()
+			newFD, err := syscall.Dup(int(oldFD))
+			if err != nil {
+				return fmt.Errorf("failed to dup FD %v: %v", oldFD, err)
+			}
+			FDs = append(FDs, newFD)
+			fdOffset++
+		}
+
+		mac := tcpip.LinkAddress(link.LinkAddress)
+		ep, err := memif.New(&memif.Options{
+			ControlChannelFd:   FDs[0],
+			MemfdFd:	    FDs[1],
+			ID:                 link.Id, // increment in case of multiple endpoints
+			MTU:                uint32(link.MTU),
+			EthernetHeader:     true,
+			Address:            mac,
+			RxMode:             memif.Interrupt,
+			GSOMaxSize:         link.GSOMaxSize,
+			SoftwareGSOEnabled: link.SoftwareGSOEnabled,
 		})
 		if err != nil {
 			return err

@@ -20,6 +20,7 @@ go_library(
         "//pkg/sentry/control",
         "//pkg/sentry/platform",
         "//pkg/tcpip/stack",
+	"//pkg/tcpip/link/memif",
         "//pkg/urpc",
         "//runsc/boot",
         "//runsc/boot/platforms",

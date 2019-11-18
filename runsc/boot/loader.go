@@ -913,7 +913,7 @@ func newEmptyNetworkStack(conf *Config, clock tcpip.Clock, uniqueID stack.Unique
 	case NetworkHost:
 		return hostinet.NewStack(), nil
 
-	case NetworkNone, NetworkSandbox:
+	case NetworkNone, NetworkSandbox, NetworkSandboxVpp:
 		// NetworkNone sets up loopback using netstack.
 		netProtos := []stack.NetworkProtocol{ipv4.NewProtocol(), ipv6.NewProtocol(), arp.NewProtocol()}
 		transProtos := []stack.TransportProtocol{tcp.NewProtocol(), udp.NewProtocol(), icmp.NewProtocol4()}

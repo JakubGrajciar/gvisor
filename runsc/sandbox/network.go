@@ -32,6 +32,8 @@ import (
 	"gvisor.dev/gvisor/pkg/urpc"
 	"gvisor.dev/gvisor/runsc/boot"
 	"gvisor.dev/gvisor/runsc/specutils"
+
+	"gvisor.dev/gvisor/pkg/tcpip/link/memif"
 )
 
 // setupNetwork configures the network stack to mimic the local network
@@ -67,6 +69,13 @@ func setupNetwork(conn *urpc.Client, pid int, spec *specs.Spec, conf *boot.Confi
 		}
 	case boot.NetworkHost:
 		// Nothing to do here.
+	case boot.NetworkSandboxVpp:
+		// Build the path to the net namespace of the sandbox process.
+		// This is what we will copy.
+		nsPath := filepath.Join("/proc", strconv.Itoa(pid), "ns/net")
+		if err := createInterfacesAndRoutesFromNSVpp(conn, nsPath, conf.HardwareGSO, conf.SoftwareGSO, conf.NumNetworkChannels, conf.MemifSocketFile); err != nil {
+			return fmt.Errorf("creating interfaces from net namespace %q: %v", nsPath, err)
+		}
 	default:
 		return fmt.Errorf("invalid network type: %d", conf.Network)
 	}
@@ -265,6 +274,183 @@ func createInterfacesAndRoutesFromNS(conn *urpc.Client, nsPath string, hardwareG
 		}
 
 		args.FDBasedLinks = append(args.FDBasedLinks, link)
+	}
+
+	log.Debugf("Setting up network, config: %+v", args)
+	if err := conn.Call(boot.NetworkCreateLinksAndRoutes, &args, nil); err != nil {
+		return fmt.Errorf("creating links and routes: %v", err)
+	}
+	return nil
+}
+
+// createInterfacesAndRoutesFromNS scrapes the interface and routes from the
+// net namespace with the given path, creates them in the sandbox, and removes
+// them from the host.
+func createInterfacesAndRoutesFromNSVpp(conn *urpc.Client, nsPath string, hardwareGSO bool, softwareGSO bool, numNetworkChannels int, memifSocketFile string) error {
+	// Join the network namespace that we will be copying.
+	restore, err := joinNetNS(nsPath)
+	if err != nil {
+		return err
+	}
+	defer restore()
+
+	// Get all interfaces in the namespace.
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return fmt.Errorf("querying interfaces: %v", err)
+	}
+
+	isRoot, err := isRootNS()
+	if err != nil {
+		return err
+	}
+	if isRoot {
+
+		return fmt.Errorf("cannot run with network enabled in root network namespace")
+	}
+
+	// Collect addresses and routes from the interfaces.
+	var args boot.CreateLinksAndRoutesArgs
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 {
+			log.Infof("Skipping down interface: %+v", iface)
+			continue
+		}
+
+		allAddrs, err := iface.Addrs()
+		if err != nil {
+			return fmt.Errorf("fetching interface addresses for %q: %v", iface.Name, err)
+		}
+
+		// We build our own loopback devices.
+		if iface.Flags&net.FlagLoopback != 0 {
+			links, err := loopbackLinks(iface, allAddrs)
+			if err != nil {
+				return fmt.Errorf("getting loopback routes and links for iface %q: %v", iface.Name, err)
+			}
+			args.LoopbackLinks = append(args.LoopbackLinks, links...)
+			continue
+		}
+
+		// Keep only IPv4 addresses.
+		var ip4addrs []*net.IPNet
+		for _, ifaddr := range allAddrs {
+			ipNet, ok := ifaddr.(*net.IPNet)
+			if !ok {
+				return fmt.Errorf("address is not IPNet: %+v", ifaddr)
+			}
+			if ipNet.IP.To4() == nil {
+				log.Warningf("IPv6 is not supported, skipping: %v", ipNet)
+				continue
+			}
+			ip4addrs = append(ip4addrs, ipNet)
+		}
+		if len(ip4addrs) == 0 {
+			log.Warningf("No IPv4 address found for interface %q, skipping", iface.Name)
+			continue
+		}
+
+		// Scrape the routes before removing the address, since that
+		// will remove the routes as well.
+		routes, def, err := routesForIface(iface)
+		if err != nil {
+			return fmt.Errorf("getting routes for interface %q: %v", iface.Name, err)
+		}
+		if def != nil {
+			if !args.DefaultGateway.Route.Empty() {
+				return fmt.Errorf("more than one default route found, interface: %v, route: %v, default route: %+v", iface.Name, def, args.DefaultGateway)
+			}
+			args.DefaultGateway.Route = *def
+			args.DefaultGateway.Name = iface.Name
+		}
+
+		link := boot.MemifLink{
+			Name:        iface.Name,
+			Id:          0,
+			MTU:         iface.MTU,
+			Routes:      routes,
+			NumChannels: numNetworkChannels,
+		}
+
+		// Get the link for the interface.
+		ifaceLink, err := netlink.LinkByName(iface.Name)
+		if err != nil {
+			return fmt.Errorf("getting link for interface %q: %v", iface.Name, err)
+		}
+		link.LinkAddress = ifaceLink.Attrs().HardwareAddr
+
+		log.Debugf("Setting up network channels")
+		// Create the socket for the device.
+		for i := 0; i < link.NumChannels; i++ {
+			log.Debugf("Creating Channel %d", i)
+
+			// Create listener socket
+			fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
+			if err != nil {
+				return fmt.Errorf("failed to create socket for %s : %v", iface.Name, err)
+			}
+			usa := &syscall.SockaddrUnix{Name: memifSocketFile}
+			err = syscall.Connect(fd, usa)
+			if err != nil {
+				return fmt.Errorf("failed to connect socket %s : %v", memifSocketFile, err)
+			}
+			// create go File from socket
+			deviceFile := os.NewFile(uintptr(fd), "memif-device-socket")
+			if deviceFile == nil {
+				return fmt.Errorf("NewFile failed %s", iface.Name)
+			}
+			socketEntry := socketEntry {
+				deviceFile: deviceFile,
+				gsoMaxSize: 0,
+			}
+			if i == 0 {
+				link.GSOMaxSize = socketEntry.gsoMaxSize
+			} else {
+				if link.GSOMaxSize != socketEntry.gsoMaxSize {
+					return fmt.Errorf("inconsistent gsoMaxSize %d and %d when creating multiple channels for same interface: %s",
+						link.GSOMaxSize, socketEntry.gsoMaxSize, iface.Name)
+				}
+			}
+			args.FilePayload.Files = append(args.FilePayload.Files, socketEntry.deviceFile)
+
+			// FIXME: TEMPORATY WORKAROUND
+			// Create memory region
+			mr := memif.MemoryRegion {
+				Size: 66816,
+				PacketBufferOffset: 1280,
+			}
+
+			err = mr.MemfdCreate()
+			if err != nil {
+				return fmt.Errorf("something: %s", err)
+			}
+
+			// create go File from memfd
+			memfdFile := os.NewFile(uintptr(mr.Fd), "memfd-dev")
+			if memfdFile == nil {
+				return fmt.Errorf("NewFile failed %s", iface.Name)
+			}
+			args.FilePayload.Files = append(args.FilePayload.Files, memfdFile)
+		}
+		if link.GSOMaxSize == 0 && softwareGSO {
+			// Hardware GSO is disabled. Let's enable software GSO.
+			link.GSOMaxSize = stack.SoftwareGSOMaxSize
+			link.SoftwareGSOEnabled = true
+		}
+
+		// Collect the addresses for the interface, enable forwarding,
+		// and remove them from the host.
+		for _, addr := range ip4addrs {
+			link.Addresses = append(link.Addresses, addr.IP)
+
+			// Steal IP address from NIC.
+			if err := removeAddress(ifaceLink, addr.String()); err != nil {
+				return fmt.Errorf("removing address %v from device %q: %v", iface.Name, addr, err)
+			}
+		}
+
+		link.NumChannels++
+		args.MemifLinks = append(args.MemifLinks, link)
 	}
 
 	log.Debugf("Setting up network, config: %+v", args)

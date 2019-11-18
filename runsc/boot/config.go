@@ -72,6 +72,10 @@ const (
 
 	// NetworkNone sets up just loopback using netstack.
 	NetworkNone
+
+	// NetworkSandbox uses internal network stack, isolated from the host,
+	// connected to VPP over shared memory interface (memif)
+	NetworkSandboxVpp
 )
 
 // MakeNetworkType converts type from string.
@@ -83,6 +87,8 @@ func MakeNetworkType(s string) (NetworkType, error) {
 		return NetworkHost, nil
 	case "none":
 		return NetworkNone, nil
+	case "vpp":
+		return NetworkSandboxVpp, nil
 	default:
 		return 0, fmt.Errorf("invalid network type %q", s)
 	}
@@ -96,6 +102,8 @@ func (n NetworkType) String() string {
 		return "host"
 	case NetworkNone:
 		return "none"
+	case NetworkSandboxVpp:
+		return "vpp"
 	default:
 		return fmt.Sprintf("unknown(%d)", n)
 	}
@@ -238,6 +246,9 @@ type Config struct {
 	// write to workaround overlayfs limitation on kernels before 4.19.
 	OverlayfsStaleRead bool
 
+	// Path to memif socket. Used to connect to VPP.
+	MemifSocketFile string
+
 	// TestOnlyAllowRunAsCurrentUserWithoutChroot should only be used in
 	// tests. It allows runsc to start the sandbox process as the current
 	// user, and without chrooting the sandbox process. This can be
@@ -281,6 +292,7 @@ func (c *Config) ToFlags() []string {
 		"--gso=" + strconv.FormatBool(c.HardwareGSO),
 		"--software-gso=" + strconv.FormatBool(c.SoftwareGSO),
 		"--overlayfs-stale-read=" + strconv.FormatBool(c.OverlayfsStaleRead),
+		"--memif-socket-file=" + c.MemifSocketFile,
 	}
 	// Only include these if set since it is never to be used by users.
 	if c.TestOnlyAllowRunAsCurrentUserWithoutChroot {

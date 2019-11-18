@@ -74,6 +74,7 @@ go_library(
         "//pkg/syserror",
         "//pkg/tcpip",
         "//pkg/tcpip/link/fdbased",
+	"//pkg/tcpip/link/memif",
         "//pkg/tcpip/link/loopback",
         "//pkg/tcpip/link/sniffer",
         "//pkg/tcpip/network/arp",
