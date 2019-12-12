@@ -13,6 +13,8 @@ go_library(
 	"memif.go",
 	"packet_dispatchers.go",
 	"packet_writers.go",
+	"atomic16_amd64.s",
+	"atomic16.go",
     ],
     importpath = "gvisor.dev/gvisor/pkg/tcpip/link/memif",
     visibility = [

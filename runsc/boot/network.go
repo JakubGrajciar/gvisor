@@ -69,7 +69,7 @@ type MemifLink struct {
 	Name               string
 	// FIXME: provide id
 	// memory interface id (unique per control channel socket)
-	Id                 uint32
+	ID                 uint32
 	NumQueuePairs      uint16
 	Log2RingSize       uint8
 	PacketBufferSize   uint32
@@ -80,12 +80,6 @@ type MemifLink struct {
 	GSOMaxSize         uint32
 	SoftwareGSOEnabled bool
 	LinkAddress        net.HardwareAddr
-	// FIXME: provide socket
-	// ControlChannel control channel socket file descriptor
-	ControlChannel int
-
-	/* FIXME: What's this? number of queues? */
-	NumChannels int
 }
 
 // LoopbackLink configures a loopback li nk.
@@ -138,7 +132,11 @@ func (n *Network) CreateLinksAndRoutes(args *CreateLinksAndRoutesArgs, _ *struct
 		}
 	} else if len(args.MemifLinks) > 0 {
 		for _, l := range args.MemifLinks {
-			wantFDs += l.NumChannels
+			// control channel FD (socket)
+			// memory region FD (memfd)
+			// one eventfd per queue
+			wantFDs += 2
+			wantFDs += int(l.NumQueuePairs * 2)
 		}
 	}
 
@@ -226,7 +224,7 @@ func (n *Network) CreateLinksAndRoutes(args *CreateLinksAndRoutesArgs, _ *struct
 		nicids[link.Name] = nicID
 
 		FDs := []int{}
-		for j := 0; j < link.NumChannels; j++ {
+		for j := 0; j < int(link.NumQueuePairs * 2 + 2); j++ {
 			// Copy the underlying FD.
 			oldFD := args.FilePayload.Files[fdOffset].Fd()
 			newFD, err := syscall.Dup(int(oldFD))
@@ -239,9 +237,11 @@ func (n *Network) CreateLinksAndRoutes(args *CreateLinksAndRoutesArgs, _ *struct
 
 		mac := tcpip.LinkAddress(link.LinkAddress)
 		ep, err := memif.New(&memif.Options{
-			ControlChannelFd:   FDs[0],
-			MemfdFd:	    FDs[1],
-			ID:                 link.Id, // increment in case of multiple endpoints
+			FDs:                FDs,
+			ID:                 link.ID,
+			NumQueuePairs:      link.NumQueuePairs,
+			Log2RingSize:       link.Log2RingSize,
+			PacketBufferSize:   link.PacketBufferSize,
 			MTU:                uint32(link.MTU),
 			EthernetHeader:     true,
 			Address:            mac,
@@ -253,7 +253,7 @@ func (n *Network) CreateLinksAndRoutes(args *CreateLinksAndRoutesArgs, _ *struct
 			return err
 		}
 
-		log.Infof("Enabling interface %q with id %d on addresses %+v (%v) w/ %d channels", link.Name, nicID, link.Addresses, mac, link.NumChannels)
+		log.Infof("Enabling interface %q with id %d on addresses %+v (%v)", link.Name, nicID, link.Addresses, mac)
 		if err := n.createNICWithAddrs(nicID, link.Name, ep, link.Addresses, false /* loopback */); err != nil {
 			return err
 		}

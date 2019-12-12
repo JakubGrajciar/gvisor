@@ -198,25 +198,21 @@ func (q *queue) readBuffer(d *Desc, buf []byte) uint32 {
 
 // TODO: investigate atomic/store barrier
 func (q *queue) writeHead(value uint16) (uint16) {
-	q.e.regions[q.region].data[q.ringOffset + descHeadOffset + 1] = uint8(value >> 8)
-	q.e.regions[q.region].data[q.ringOffset + descHeadOffset] = uint8(value)
+	atomicstore16(&q.e.regions[q.region].data[q.ringOffset + descHeadOffset], value)
 	return value
 }
 // TODO: investigate atomic/store barrier
 func (q *queue) writeTail(value uint16) (uint16) {
-	q.e.regions[q.region].data[q.ringOffset + descTailOffset + 1] = uint8(value >> 8)
-	q.e.regions[q.region].data[q.ringOffset + descTailOffset] = uint8(value)
+	atomicstore16(&q.e.regions[q.region].data[q.ringOffset + descTailOffset], value)
 	return value
 }
 
 func (q *queue) readHead() (head uint16) {
-	head = uint16(q.e.regions[q.region].data[q.ringOffset + descHeadOffset + 1] << 8) | uint16(q.e.regions[q.region].data[q.ringOffset + descHeadOffset])
-	return head
+	return atomicload16(&q.e.regions[q.region].data[q.ringOffset + descHeadOffset])
 }
 
 func (q *queue) readTail() (tail uint16) {
-	tail = uint16(q.e.regions[q.region].data[q.ringOffset + descTailOffset + 1] << 8) | uint16(q.e.regions[q.region].data[q.ringOffset + descTailOffset])
-	return tail
+	return atomicload16(&q.e.regions[q.region].data[q.ringOffset + descTailOffset])
 }
 
 func (q *queue) isInterrupt() (bool, error) {

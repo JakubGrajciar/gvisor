@@ -25,11 +25,14 @@ package memif
 
 import (
 	"syscall"
+	"fmt"
+	"runtime"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	//"gvisor.dev/gvisor/pkg/tcpip/link/rawfile"
 )
 
 var BufConfig = []int{128, 256, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768}
@@ -103,13 +106,37 @@ func (d *queueDispatcher) capViews(n int, buffers []int) int {
 	return len(buffers)
 }
 
+func epollPwait(fd int, to int) (err error) {
+	var event syscall.EpollEvent
+	var events [maxEpollEvents]syscall.EpollEvent
+
+	epfd, err := syscall.EpollCreate1(0)
+	if err != nil {
+		return fmt.Errorf("epoll_create1: %s", err)
+	}
+
+	// Ready to read
+	event.Events = syscall.EPOLLIN | syscall.EPOLLERR
+	event.Fd = int32(fd)
+	err = syscall.EpollCtl(epfd, syscall.EPOLL_CTL_ADD, fd, &event)
+	if err != nil {
+		return fmt.Errorf("epoll_ctl: %s", err)
+	}
+
+	_, err = syscall.EpollWait(epfd, events[:], to)
+	if err != nil {
+		return fmt.Errorf("epoll_wait: %s", err)
+	}
+
+	return nil
+}
+
 // Block until packets arrive
 func (d *queueDispatcher) readPackets () (int, *tcpip.Error) {
 	rSize := uint16(1 << d.q.log2RingSize)
 	mask := rSize - 1
 	n := uint32(0)
 
-	// block util packets are ready
 	for {
 		// M2S only
 		slot := d.q.lastTail
@@ -148,7 +175,9 @@ func (d *queueDispatcher) readPackets () (int, *tcpip.Error) {
 		if n > 0 {
 			return int(n), nil
 		}
-		// FIXME: interrupt fd
+
+		runtime.Gosched()
+
 /*
 		event := rawfile.PollEvent{
 			FD:     int32(d.q.interruptFd),

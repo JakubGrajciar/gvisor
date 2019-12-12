@@ -32,35 +32,16 @@ func vnetHdrToByteSlice(hdr *virtioNetHdr) (slice []byte) {
 	return
 }
 
-func (mr *MemoryRegion)MemfdCreate() (err error) {
-	if mr.Size == 0 {
-		return fmt.Errorf("MemfdCreate: invalid region size")
-	}
-
+func MemfdCreate() (mfd int, err error) {
 	p0, err := syscall.BytePtrFromString("memif_region_0")
 	if err != nil {
-		return fmt.Errorf("MemfdCreate: %s", err)
+		return -1, fmt.Errorf("MemfdCreate: %s", err)
 	}
 
-	fd, _, syserr := syscall.Syscall(SYS_MEMFD_CREATE, uintptr(unsafe.Pointer(p0)), uintptr(MFD_ALLOW_SEALING), uintptr(0))
-	if syserr != 0 {
-		return fmt.Errorf("MemfdCreate: %s", os.NewSyscallError("memfd_create", syserr))
+	u_mfd, _, errno := syscall.Syscall(SYS_MEMFD_CREATE, uintptr(unsafe.Pointer(p0)), uintptr(MFD_ALLOW_SEALING), uintptr(0))
+	if errno != 0 {
+		return -1, fmt.Errorf("MemfdCreate: %s", os.NewSyscallError("memfd_create", errno))
 	}
 
-	_, _, syserr = syscall.Syscall(syscall.SYS_FCNTL, fd, uintptr(F_ADD_SEALS), uintptr(F_SEAL_SHRINK))
-	if syserr != 0 {
-		syscall.Close(int(fd))
-		return fmt.Errorf("MemfdCreate: %s", os.NewSyscallError("fcntl", syserr))
-	}
-
-	mr.Fd = int(fd)
-
-	err = syscall.Ftruncate(mr.Fd, int64(mr.Size))
-	if err != nil {
-		syscall.Close(int(fd))
-		mr.Fd = -1
-		return fmt.Errorf("MemfdCreate: %s", err)
-	}
-
-	return nil
+	return int(u_mfd), nil
 }

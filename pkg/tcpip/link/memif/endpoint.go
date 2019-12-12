@@ -100,13 +100,14 @@ type endpoint struct {
 
 	id uint32
 
+	// memif configuration
 	config memifConfig
+	// configuration in use
+	run memifConfig
 
 	remoteName string
 
 	peerName string
-
-	run memifConfig
 
 	regions []MemoryRegion
 
@@ -150,14 +151,11 @@ type endpoint struct {
 
 // Options specify the details about the memif endpoint to be created.
 type Options struct {
-	// Listener socket fd
-	ControlChannelFd int
+	FDs []int
 
-	MemfdFd int
-
-	NumQueuePairs      uint16
-	Log2RingSize       uint8
-	PacketBufferSize   uint32
+	NumQueuePairs uint16
+	Log2RingSize uint8
+	PacketBufferSize uint32
 
 	// Unique id (unique per control channel)
 	ID uint32
@@ -229,21 +227,20 @@ func New(opts *Options) (stack.LinkEndpoint, error) {
 		caps |= stack.CapabilityDisconnectOk
 	}
 
-	if opts.ControlChannelFd < 0 {
-		return nil, fmt.Errorf("Invalid control channel file descriptor.")
+	if len(opts.FDs) < int(2 + opts.NumQueuePairs * 2) {
+		return nil, fmt.Errorf("Not enough file descriptors")
 	}
 
-	// TODO: user defined
 	config := memifConfig {
-		numS2MRings: 1,
-		numM2SRings: 1,
-		log2RingSize: 5,
-		packetBufferSize: 1024,
+		numS2MRings: opts.NumQueuePairs,
+		numM2SRings: opts.NumQueuePairs,
+		log2RingSize: opts.Log2RingSize,
+		packetBufferSize: opts.PacketBufferSize,
 	}
 
 	e := &endpoint {
-		controlChannelFd:   opts.ControlChannelFd,
-		memfdFd:	    opts.MemfdFd,
+		controlChannelFd:   opts.FDs[0],
+		memfdFd:	    opts.FDs[1],
 		id:                 opts.ID,
 		config:             config,
 		mtu:                opts.MTU,
@@ -252,6 +249,33 @@ func New(opts *Options) (stack.LinkEndpoint, error) {
 		addr:               opts.Address,
 		hdrSize:            hdrSize,
 		rxMode:             opts.RxMode,
+	}
+
+	// assign endpoint and interrupt fd to queues
+	for i := uint16(0); i < opts.NumQueuePairs; i++ {
+		txq := queue {
+			ringType: ringTypeS2M,
+			log2RingSize: 0,
+			region: 0,
+			e: e,
+			ringOffset: 0,
+			lastHead: 0,
+			lastTail: 0,
+			interruptFd: opts.FDs[2 + i],
+		}
+		e.txQueues = append(e.txQueues, txq)
+
+		rxq := queue {
+			ringType: ringTypeM2S,
+			log2RingSize: 0,
+			region: 0,
+			e: e,
+			ringOffset: 0,
+			lastHead: 0,
+			lastTail: 0,
+			interruptFd: opts.FDs[2 + i + opts.NumQueuePairs],
+		}
+		e.rxQueues = append(e.rxQueues, rxq)
 	}
 
 	err := e.Connect()
@@ -342,11 +366,19 @@ func (e *endpoint) Wait() {
 	e.wg.Wait()
 }
 
+func EventFd() (efd int, err error) {
+	u_efd, _, errno := syscall.Syscall(syscall.SYS_EVENTFD2, uintptr(0), uintptr(EFD_NONBLOCK), 0)
+	if errno != 0 {
+		return -1, os.NewSyscallError("eventfd", errno)
+	}
+	return int(u_efd), nil
+}
+
 func (e *endpoint) addRegion(hasPacketBuffers bool, hasRings bool) (err error) {
 	var r MemoryRegion
 
 	if hasRings {
-		r.PacketBufferOffset = uint32((e.run.numS2MRings + e.run.numM2SRings) * (descSize + ringSize) * (1 << e.run.log2RingSize))
+		r.PacketBufferOffset = uint32((e.run.numS2MRings + e.run.numM2SRings) * (ringSize + descSize * (1 << e.run.log2RingSize)))
 	} else {
 		r.PacketBufferOffset = 0
 	}
@@ -357,8 +389,21 @@ func (e *endpoint) addRegion(hasPacketBuffers bool, hasRings bool) (err error) {
 		r.Size = uint64(r.PacketBufferOffset)
 	}
 
-	// FIXME: propper memfd assignemnt
+	// Create region in New()?
 	r.Fd = e.memfdFd
+
+	_, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(r.Fd), uintptr(F_ADD_SEALS), uintptr(F_SEAL_SHRINK))
+	if errno != 0 {
+		syscall.Close(r.Fd)
+		return fmt.Errorf("MemfdCreate: %s", os.NewSyscallError("fcntl", errno))
+	}
+
+	err = syscall.Ftruncate(r.Fd, int64(r.Size))
+	if err != nil {
+		syscall.Close(r.Fd)
+		r.Fd = -1
+		return fmt.Errorf("MemfdCreate: %s", err)
+	}
 
 	r.data, err = syscall.Mmap(r.Fd, 0, int(r.Size), syscall.PROT_READ | syscall.PROT_WRITE, syscall.MAP_SHARED)
 	if err != nil {
@@ -383,7 +428,7 @@ func (e *endpoint) initializeRegions() (err error) {
 func (e *endpoint) initializeRings() (err error) {
 	rSize := (1 << e.run.log2RingSize)
 	// TODO: write to single buffer then coppy to shm
-	var buf *bytes.Buffer
+	buf := new(bytes.Buffer)
 
 	for i := 0; uint16(i) < e.run.numS2MRings; i++ {
 		ring := Ring {
@@ -392,13 +437,11 @@ func (e *endpoint) initializeRings() (err error) {
 			Cookie: Cookie,
 			Flags: 0,
 		}
-		rOffset := e.getRingOffset(0, ringTypeS2M, i)
-		buf = new(bytes.Buffer)
 		err = binary.Write(buf, binary.LittleEndian, ring)
 		if err != nil {
 			return fmt.Errorf("initializeRings: %s", err)
 		}
-		copy(e.regions[0].data[rOffset:], buf.Bytes())
+		//copy(e.regions[0].data[rOffset:], buf.Bytes())
 		for j := 0; j < rSize; j++ {
 			slot := i * rSize + j
 			desc := Desc {
@@ -407,12 +450,11 @@ func (e *endpoint) initializeRings() (err error) {
 				Offset: e.regions[0].PacketBufferOffset + uint32(slot) * e.run.packetBufferSize,
 				Length: e.run.packetBufferSize,
 			}
-			buf = new(bytes.Buffer)
 			err = binary.Write(buf, binary.LittleEndian, desc)
 			if err != nil {
 				return fmt.Errorf("initializeRings: %s", err)
 			}
-			copy(e.regions[0].data[rOffset + ringSize + uintptr(j * descSize):], buf.Bytes())
+			//copy(e.regions[0].data[rOffset + ringSize + uintptr(j * descSize):], buf.Bytes())
 		}
 	}
 
@@ -421,15 +463,13 @@ func (e *endpoint) initializeRings() (err error) {
 			Head: 0,
 			Tail: 0,
 			Cookie: Cookie,
-			Flags: 0,
+			Flags: ringFlagInterrupt,
 		}
-		rOffset := e.getRingOffset(0, ringTypeM2S, i)
-		buf = new(bytes.Buffer)
 		err = binary.Write(buf, binary.LittleEndian, ring)
 		if err != nil {
 			return fmt.Errorf("initializeRings: %s", err)
 		}
-		copy(e.regions[0].data[rOffset:], buf.Bytes())
+		//copy(e.regions[0].data[rOffset:], buf.Bytes())
 		for j := 0; j < rSize; j++ {
 			slot := (uint16(i) + e.run.numS2MRings) * uint16(rSize) + uint16(j)
 			desc := Desc {
@@ -438,51 +478,30 @@ func (e *endpoint) initializeRings() (err error) {
 				Offset: e.regions[0].PacketBufferOffset + uint32(slot) * e.run.packetBufferSize,
 				Length: e.run.packetBufferSize,
 			}
-			buf = new(bytes.Buffer)
 			err = binary.Write(buf, binary.LittleEndian, desc)
 			if err != nil {
 				return fmt.Errorf("initializeRings: %s", err)
 			}
-			copy(e.regions[0].data[rOffset + ringSize + uintptr(j * descSize):], buf.Bytes())
+			//copy(e.regions[0].data[rOffset + ringSize + uintptr(j * descSize):], buf.Bytes())
 		}
 	}
+
+	copy(e.regions[0].data[:], buf.Bytes())
 
 	return nil
 }
 
 func (e *endpoint) initializeQueues() (err error) {
-	for i := 0; uint16(i) < e.run.numS2MRings; i++ {
-		efd, _, errno := syscall.Syscall(syscall.SYS_EVENTFD2, 0, uintptr(EFD_NONBLOCK), 0)
-		if errno != 0 {
-			return os.NewSyscallError("eventf", errno)
-		}
-		queue := queue {
-			log2RingSize: e.run.log2RingSize,
-			region: 0,
-			e: e,
-			ringOffset: e.getRingOffset(0, ringTypeS2M, i),
-			lastHead: 0,
-			lastTail: 0,
-			interruptFd: int(efd),
-		}
-		e.txQueues = append(e.txQueues, queue)
+	for qid, _ := range e.txQueues {
+		q := &e.txQueues[qid]
+		q.log2RingSize = e.run.log2RingSize
+		q.ringOffset = e.getRingOffset(0, ringTypeS2M, qid)
 	}
 
-	for i := 0; uint16(i) < e.run.numM2SRings; i++ {
-		efd, _, errno := syscall.Syscall(syscall.SYS_EVENTFD2, 0, uintptr(EFD_NONBLOCK), 0)
-		if errno != 0 {
-			return os.NewSyscallError("eventf", errno)
-		}
-		queue := queue {
-			log2RingSize: e.run.log2RingSize,
-			region: 0,
-			e: e,
-			ringOffset: e.getRingOffset(0, ringTypeM2S, i),
-			lastHead: 0,
-			lastTail: 0,
-			interruptFd: int(efd),
-		}
-		e.rxQueues = append(e.rxQueues, queue)
+	for qid, _ := range e.rxQueues {
+		q := &e.rxQueues[qid]
+		q.log2RingSize = e.run.log2RingSize
+		q.ringOffset = e.getRingOffset(0, ringTypeM2S, qid)
 	}
 
 	return nil

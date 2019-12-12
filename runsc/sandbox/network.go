@@ -365,11 +365,14 @@ func createInterfacesAndRoutesFromNSVpp(conn *urpc.Client, nsPath string, hardwa
 		}
 
 		link := boot.MemifLink{
-			Name:        iface.Name,
-			Id:          0,
-			MTU:         iface.MTU,
-			Routes:      routes,
-			NumChannels: numNetworkChannels,
+			Name:               iface.Name,
+			// TODO: user configured
+			ID:                 0,
+			NumQueuePairs:      1,
+			Log2RingSize:       10,
+			PacketBufferSize:   1024,
+			MTU:                iface.MTU,
+			Routes:             routes,
 		}
 
 		// Get the link for the interface.
@@ -379,59 +382,56 @@ func createInterfacesAndRoutesFromNSVpp(conn *urpc.Client, nsPath string, hardwa
 		}
 		link.LinkAddress = ifaceLink.Attrs().HardwareAddr
 
-		log.Debugf("Setting up network channels")
-		// Create the socket for the device.
-		for i := 0; i < link.NumChannels; i++ {
-			log.Debugf("Creating Channel %d", i)
-
-			// Create listener socket
-			fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
-			if err != nil {
-				return fmt.Errorf("failed to create socket for %s : %v", iface.Name, err)
-			}
-			usa := &syscall.SockaddrUnix{Name: memifSocketFile}
-			err = syscall.Connect(fd, usa)
-			if err != nil {
-				return fmt.Errorf("failed to connect socket %s : %v", memifSocketFile, err)
-			}
-			// create go File from socket
-			deviceFile := os.NewFile(uintptr(fd), "memif-device-socket")
-			if deviceFile == nil {
-				return fmt.Errorf("NewFile failed %s", iface.Name)
-			}
-			socketEntry := socketEntry {
-				deviceFile: deviceFile,
-				gsoMaxSize: 0,
-			}
-			if i == 0 {
-				link.GSOMaxSize = socketEntry.gsoMaxSize
-			} else {
-				if link.GSOMaxSize != socketEntry.gsoMaxSize {
-					return fmt.Errorf("inconsistent gsoMaxSize %d and %d when creating multiple channels for same interface: %s",
-						link.GSOMaxSize, socketEntry.gsoMaxSize, iface.Name)
-				}
-			}
-			args.FilePayload.Files = append(args.FilePayload.Files, socketEntry.deviceFile)
-
-			// FIXME: TEMPORATY WORKAROUND
-			// Create memory region
-			mr := memif.MemoryRegion {
-				Size: 66816,
-				PacketBufferOffset: 1280,
-			}
-
-			err = mr.MemfdCreate()
-			if err != nil {
-				return fmt.Errorf("something: %s", err)
-			}
-
-			// create go File from memfd
-			memfdFile := os.NewFile(uintptr(mr.Fd), "memfd-dev")
-			if memfdFile == nil {
-				return fmt.Errorf("NewFile failed %s", iface.Name)
-			}
-			args.FilePayload.Files = append(args.FilePayload.Files, memfdFile)
+		// Create control channel socket
+		fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
+		if err != nil {
+			return fmt.Errorf("failed to create socket for %s : %v", iface.Name, err)
 		}
+		usa := &syscall.SockaddrUnix{Name: memifSocketFile}
+		// Connect to listener socket
+		err = syscall.Connect(fd, usa)
+		if err != nil {
+			return fmt.Errorf("failed to connect socket %s : %v", memifSocketFile, err)
+		}
+		// create go File from socket
+		deviceFile := os.NewFile(uintptr(fd), "memif-device-socket")
+		if deviceFile == nil {
+			return fmt.Errorf("NewFile failed %s", iface.Name)
+		}
+		socketEntry := socketEntry {
+			deviceFile: deviceFile,
+			gsoMaxSize: 0,
+		}
+
+		link.GSOMaxSize = socketEntry.gsoMaxSize
+
+		args.FilePayload.Files = append(args.FilePayload.Files, socketEntry.deviceFile)
+
+		// Create shared memory file
+		mfd, err := memif.MemfdCreate()
+		if err != nil {
+			return err
+		}
+		// create go File from memfd
+		memfdFile := os.NewFile(uintptr(mfd), "memfd-dev")
+		if memfdFile == nil {
+			return fmt.Errorf("NewFile failed %s", iface.Name)
+		}
+		args.FilePayload.Files = append(args.FilePayload.Files, memfdFile)
+
+		// Create eventfd for each queue
+		for i := 0; i < int(link.NumQueuePairs * 2); i++ {
+			efd, err := memif.EventFd()
+			if err != nil {
+				return err
+			}
+			eventFile := os.NewFile(uintptr(efd), "eventfd" + string(i))
+			if eventFile == nil {
+				return fmt.Errorf("NewFile failed %s", iface.Name)
+			}
+			args.FilePayload.Files = append(args.FilePayload.Files, eventFile)
+		}
+
 		if link.GSOMaxSize == 0 && softwareGSO {
 			// Hardware GSO is disabled. Let's enable software GSO.
 			link.GSOMaxSize = stack.SoftwareGSOMaxSize
@@ -449,7 +449,6 @@ func createInterfacesAndRoutesFromNSVpp(conn *urpc.Client, nsPath string, hardwa
 			}
 		}
 
-		link.NumChannels++
 		args.MemifLinks = append(args.MemifLinks, link)
 	}
 
