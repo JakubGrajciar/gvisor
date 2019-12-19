@@ -370,7 +370,7 @@ func createInterfacesAndRoutesFromNSVpp(conn *urpc.Client, nsPath string, hardwa
 			ID:                 0,
 			NumQueuePairs:      1,
 			Log2RingSize:       10,
-			PacketBufferSize:   1024,
+			PacketBufferSize:   2048,
 			MTU:                iface.MTU,
 			Routes:             routes,
 		}
