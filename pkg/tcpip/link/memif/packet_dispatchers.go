@@ -32,7 +32,6 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
-	//"gvisor.dev/gvisor/pkg/tcpip/link/rawfile"
 )
 
 var BufConfig = []int{128, 256, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768}
@@ -149,13 +148,25 @@ func (d *queueDispatcher) readPackets () (int, *tcpip.Error) {
 			desc, _ := d.q.readDesc(slot & mask)
 
 			// read packet form memif buffer
-			// TODO: chained buffers
-			n = d.q.readBuffer(&desc, d.views[0])
-			// set length?
-			// iovecs[0].Len = desc.Length
+			view, view_offset, length := d.q.readBuffer(&desc, d.views, 0, 0)
+			n = length
 
 			slot++
 			nSlots--
+
+			for (desc.Flags & descFlagNext) == descFlagNext {
+				if nSlots == 0 {
+					// FIXME: error, incomplete packet
+					break
+				}
+
+				desc, _ := d.q.readDesc(slot & mask)
+				view, view_offset, length = d.q.readBuffer(&desc, d.views, view, view_offset)
+				n += length
+
+				slot++
+				nSlots--
+			}
 
 			d.q.lastTail = slot;
 		}

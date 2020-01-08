@@ -26,6 +26,7 @@ package memif
 import (
 	"syscall"
 	"fmt"
+	"math"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -33,15 +34,15 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 )
 
+// BLOCKING
 func (e *endpoint) writePacket(qid uint16, b0 []byte, b1 []byte, b2 []byte) *tcpip.Error {
 	q := e.txQueues[qid]
 
 	rSize := uint16(1 << q.log2RingSize)
 	mask := rSize - 1
+	n := 0
 
-	if len(b0) + len(b1) + len(b2) > int(e.run.packetBufferSize) {
-		return tcpip.ErrNoBufferSpace
-	}
+	req_bufs := uint16(math.Ceil(float64(len(b0) + len(b1) + len(b2)) / float64(q.e.run.packetBufferSize)))
 
 	// block until all buffers are transmitted
 	for {
@@ -51,7 +52,8 @@ func (e *endpoint) writePacket(qid uint16, b0 []byte, b1 []byte, b2 []byte) *tcp
 		slot := q.readHead()
 		nFree = rSize - slot + q.lastTail
 
-		if nFree == 0 {
+		// make sure there are enough buffers available
+		if nFree < req_bufs {
 			continue
 		}
 
@@ -66,15 +68,70 @@ func (e *endpoint) writePacket(qid uint16, b0 []byte, b1 []byte, b2 []byte) *tcp
 		d.Length = 0
 
 		// write packet into memif buffer
-		// TODO: chained buffers
 		if len(b0) > 0 {
-			q.writeBuffer(&d, b0)
+			n = q.writeBuffer(&d, b0)
+			for n < len(b0) {
+				d.Flags |= descFlagNext
+				q.writeDesc(slot & mask, &d)
+				slot++
+				nFree--
+
+				// copy descriptor from shm
+				d, err := q.readDesc(slot & mask)
+				if err != nil {
+					return tcpip.ErrInvalidEndpointState
+				}
+				// reset flags
+				d.Flags = 0
+				// reset length
+				d.Length = 0
+
+				n += q.writeBuffer(&d, b0[n:])
+			}
 		}
+
 		if len(b1) > 0 {
-			q.writeBuffer(&d, b1)
+			n = q.writeBuffer(&d, b1)
+			for n < len(b1) {
+				d.Flags |= descFlagNext
+				q.writeDesc(slot & mask, &d)
+				slot++
+				nFree--
+
+				// copy descriptor from shm
+				d, err := q.readDesc(slot & mask)
+				if err != nil {
+					return tcpip.ErrInvalidEndpointState
+				}
+				// reset flags
+				d.Flags = 0
+				// reset length
+				d.Length = 0
+
+				n += q.writeBuffer(&d, b1[n:])
+			}
 		}
+
 		if len(b2) > 0 {
-			q.writeBuffer(&d, b2)
+			n = q.writeBuffer(&d, b2)
+			for n < len(b2) {
+				d.Flags |= descFlagNext
+				q.writeDesc(slot & mask, &d)
+				slot++
+				nFree--
+
+				// copy descriptor from shm
+				d, err := q.readDesc(slot & mask)
+				if err != nil {
+					return tcpip.ErrInvalidEndpointState
+				}
+				// reset flags
+				d.Flags = 0
+				// reset length
+				d.Length = 0
+
+				n += q.writeBuffer(&d, b2[n:])
+			}
 		}
 
 		// copy descriptor to shm

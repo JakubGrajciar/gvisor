@@ -17,6 +17,8 @@ package memif
 import (
 	"bytes"
 	"encoding/binary"
+
+	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 )
 
 const Cookie = 0x3E31F20
@@ -180,20 +182,29 @@ func (q *queue) writeDesc(slot uint16, d *Desc) (err error) {
 }
 
 // write contents of buf into shm buffer, return number of bytes written
-func (q *queue) writeBuffer(d *Desc, buf []byte) (n uint32) {
-	n = q.e.run.packetBufferSize - d.Length
-	if n > uint32(len(buf)) {
-		n = uint32(len(buf))
-	}
-	copy(q.e.regions[q.region].data[d.Offset + d.Length:], buf[:n])
-	d.Length += n
-	return n
+func (q *queue) writeBuffer(d *Desc, buf []byte) (n int) {
+	nBytes := copy(q.e.regions[q.region].data[d.Offset + d.Length:d.Offset + q.e.run.packetBufferSize], buf)
+	d.Length += uint32(nBytes)
+	return nBytes
 }
 
-// FIXME: check buf len
-func (q *queue) readBuffer(d *Desc, buf []byte) uint32 {
-	copy(buf, q.e.regions[q.region].data[d.Offset:d.Offset + d.Length])
-	return d.Length
+// returns number of bytes copied
+func (q *queue) readBuffer(d *Desc, views []buffer.View, view int, view_offset uint32) (view_ret int, view_offset_ret uint32, length uint32) {
+	length = d.Length
+	view_ret = view
+	var nBytes uint32 = 0
+	var offset uint32 = 0
+
+	for length != 0 && len(views) > view {
+		nBytes = uint32(copy(views[view][view_offset:], q.e.regions[q.region].data[d.Offset + offset:d.Offset + d.Length]))
+		length -= nBytes
+		offset += nBytes
+		view_offset = 0
+		view_ret = view
+		view++;
+	}
+
+	return view_ret, view_offset + nBytes, offset
 }
 
 // TODO: investigate atomic/store barrier
