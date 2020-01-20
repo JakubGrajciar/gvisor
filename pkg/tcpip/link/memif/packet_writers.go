@@ -25,8 +25,7 @@ package memif
 
 import (
 	"syscall"
-	"fmt"
-	"math"
+//	"fmt"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -41,8 +40,8 @@ func (e *endpoint) writePacket(qid uint16, b0 []byte, b1 []byte, b2 []byte) *tcp
 	rSize := uint16(1 << q.log2RingSize)
 	mask := rSize - 1
 	n := 0
-
-	req_bufs := uint16(math.Ceil(float64(len(b0) + len(b1) + len(b2)) / float64(q.e.run.packetBufferSize)))
+	var err error = nil
+	var d Desc
 
 	// block until all buffers are transmitted
 	for {
@@ -53,12 +52,13 @@ func (e *endpoint) writePacket(qid uint16, b0 []byte, b1 []byte, b2 []byte) *tcp
 		nFree = rSize - slot + q.lastTail
 
 		// make sure there are enough buffers available
-		if nFree < req_bufs {
+		// packet buffer size = 32768, MTU = 65536
+		if nFree < 2 {
 			continue
 		}
 
 		// copy descriptor from shm
-		d, err := q.readDesc(slot & mask)
+		d, err = q.readDesc(slot & mask)
 		if err != nil {
 			return tcpip.ErrInvalidEndpointState
 		}
@@ -68,38 +68,36 @@ func (e *endpoint) writePacket(qid uint16, b0 []byte, b1 []byte, b2 []byte) *tcp
 		d.Length = 0
 
 		// write packet into memif buffer
-		if len(b0) > 0 {
-			n = q.writeBuffer(&d, b0)
-			for n < len(b0) {
-				d.Flags |= descFlagNext
-				q.writeDesc(slot & mask, &d)
-				slot++
-				nFree--
+		q.writeBuffer(&d, b0)
+		/*
+		if n < len(b0) {
+			d.Flags |= descFlagNext
+			q.writeDesc(slot & mask, &d)
+			slot++
 
-				// copy descriptor from shm
-				d, err := q.readDesc(slot & mask)
-				if err != nil {
-					return tcpip.ErrInvalidEndpointState
-				}
-				// reset flags
-				d.Flags = 0
-				// reset length
-				d.Length = 0
-
-				n += q.writeBuffer(&d, b0[n:])
+			// copy descriptor from shm
+			d, err = q.readDesc(slot & mask)
+			if err != nil {
+				return tcpip.ErrInvalidEndpointState
 			}
+			// reset flags
+			d.Flags = 0
+			// reset length
+			d.Length = 0
+
+			n += q.writeBuffer(&d, b0[n:])
 		}
+		*/
 
 		if len(b1) > 0 {
 			n = q.writeBuffer(&d, b1)
-			for n < len(b1) {
+			if n < len(b1) {
 				d.Flags |= descFlagNext
 				q.writeDesc(slot & mask, &d)
 				slot++
-				nFree--
 
 				// copy descriptor from shm
-				d, err := q.readDesc(slot & mask)
+				d, err = q.readDesc(slot & mask)
 				if err != nil {
 					return tcpip.ErrInvalidEndpointState
 				}
@@ -111,17 +109,16 @@ func (e *endpoint) writePacket(qid uint16, b0 []byte, b1 []byte, b2 []byte) *tcp
 				n += q.writeBuffer(&d, b1[n:])
 			}
 		}
-
+		/*
 		if len(b2) > 0 {
 			n = q.writeBuffer(&d, b2)
 			for n < len(b2) {
-				d.Flags |= descFlagNext
 				q.writeDesc(slot & mask, &d)
 				slot++
 				nFree--
 
 				// copy descriptor from shm
-				d, err := q.readDesc(slot & mask)
+				d, err = q.readDesc(slot & mask)
 				if err != nil {
 					return tcpip.ErrInvalidEndpointState
 				}
@@ -133,13 +130,13 @@ func (e *endpoint) writePacket(qid uint16, b0 []byte, b1 []byte, b2 []byte) *tcp
 				n += q.writeBuffer(&d, b2[n:])
 			}
 		}
+		*/
 
 		// copy descriptor to shm
 		q.writeDesc(slot & mask, &d)
 
 		// increment counters
 		slot++
-		nFree--
 
 		// S2M ring, as this is Slave interface
 		q.writeHead(slot)
@@ -182,7 +179,7 @@ func (e *endpoint) WritePacket(r *stack.Route, gso *stack.GSO, protocol tcpip.Ne
 		}
 		eth.Encode(ethHdr)
 	}
-
+/*
 	if e.Capabilities()&stack.CapabilityHardwareGSO != 0 {
 		// Disable for now
 		vnetHdr := virtioNetHdr{}
@@ -209,6 +206,7 @@ func (e *endpoint) WritePacket(r *stack.Route, gso *stack.GSO, protocol tcpip.Ne
 
 		return e.writePacket(0, vnetHdrBuf, pkt.Header.View(), pkt.Data.ToView())
 	}
+*/
 
 	return e.writePacket(0, pkt.Header.View(), pkt.Data.ToView(), nil)
 }

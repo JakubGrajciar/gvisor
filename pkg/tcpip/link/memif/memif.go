@@ -189,22 +189,8 @@ func (q *queue) writeBuffer(d *Desc, buf []byte) (n int) {
 }
 
 // returns number of bytes copied
-func (q *queue) readBuffer(d *Desc, views []buffer.View, view int, view_offset uint32) (view_ret int, view_offset_ret uint32, length uint32) {
-	length = d.Length
-	view_ret = view
-	var nBytes uint32 = 0
-	var offset uint32 = 0
-
-	for length != 0 && len(views) > view {
-		nBytes = uint32(copy(views[view][view_offset:], q.e.regions[q.region].data[d.Offset + offset:d.Offset + d.Length]))
-		length -= nBytes
-		offset += nBytes
-		view_offset = 0
-		view_ret = view
-		view++;
-	}
-
-	return view_ret, view_offset + nBytes, offset
+func (q *queue) readBuffer(d *Desc) (buffer.View) {
+	return buffer.NewViewFromBytes(q.e.regions[q.region].data[d.Offset:d.Offset + d.Length])
 }
 
 // TODO: investigate atomic/store barrier

@@ -70,6 +70,7 @@ type MemifLink struct {
 	// FIXME: provide id
 	// memory interface id (unique per control channel socket)
 	ID                 uint32
+	IsMaster           bool
 	NumQueuePairs      uint16
 	Log2RingSize       uint8
 	PacketBufferSize   uint32
@@ -132,11 +133,16 @@ func (n *Network) CreateLinksAndRoutes(args *CreateLinksAndRoutesArgs, _ *struct
 		}
 	} else if len(args.MemifLinks) > 0 {
 		for _, l := range args.MemifLinks {
-			// control channel FD (socket)
-			// memory region FD (memfd)
-			// one eventfd per queue
-			wantFDs += 2
-			wantFDs += int(l.NumQueuePairs * 2)
+			if l.IsMaster {
+				// control channel FD
+				wantFDs += 1
+			} else {
+				// control channel FD (socket) FDs[0]
+				// memory region FD (memfd) FDs[1]
+				// one eventfd per queue FDs[NumQueuePairs]
+				wantFDs += 2
+				wantFDs += int(l.NumQueuePairs * 2)
+			}
 		}
 	}
 
@@ -224,7 +230,11 @@ func (n *Network) CreateLinksAndRoutes(args *CreateLinksAndRoutesArgs, _ *struct
 		nicids[link.Name] = nicID
 
 		FDs := []int{}
-		for j := 0; j < int(link.NumQueuePairs * 2 + 2); j++ {
+		nFDs := 1
+		if !link.IsMaster {
+			nFDs = int(link.NumQueuePairs * 2 + 2)
+		}
+		for j := 0; j < nFDs; j++ {
 			// Copy the underlying FD.
 			oldFD := args.FilePayload.Files[fdOffset].Fd()
 			newFD, err := syscall.Dup(int(oldFD))
@@ -239,6 +249,7 @@ func (n *Network) CreateLinksAndRoutes(args *CreateLinksAndRoutesArgs, _ *struct
 		ep, err := memif.New(&memif.Options{
 			FDs:                FDs,
 			ID:                 link.ID,
+			IsMaster:           link.IsMaster,
 			NumQueuePairs:      link.NumQueuePairs,
 			Log2RingSize:       link.Log2RingSize,
 			PacketBufferSize:   link.PacketBufferSize,

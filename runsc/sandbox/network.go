@@ -73,7 +73,7 @@ func setupNetwork(conn *urpc.Client, pid int, spec *specs.Spec, conf *boot.Confi
 		// Build the path to the net namespace of the sandbox process.
 		// This is what we will copy.
 		nsPath := filepath.Join("/proc", strconv.Itoa(pid), "ns/net")
-		if err := createInterfacesAndRoutesFromNSVpp(conn, nsPath, conf.HardwareGSO, conf.SoftwareGSO, conf.NumNetworkChannels, conf.MemifSocketFile); err != nil {
+		if err := createInterfacesAndRoutesFromNSVpp(conn, nsPath, conf.HardwareGSO, /* conf.SoftwareGSO */ false, conf.NumNetworkChannels, conf.MemifConfig); err != nil {
 			return fmt.Errorf("creating interfaces from net namespace %q: %v", nsPath, err)
 		}
 	default:
@@ -286,7 +286,7 @@ func createInterfacesAndRoutesFromNS(conn *urpc.Client, nsPath string, hardwareG
 // createInterfacesAndRoutesFromNS scrapes the interface and routes from the
 // net namespace with the given path, creates them in the sandbox, and removes
 // them from the host.
-func createInterfacesAndRoutesFromNSVpp(conn *urpc.Client, nsPath string, hardwareGSO bool, softwareGSO bool, numNetworkChannels int, memifSocketFile string) error {
+func createInterfacesAndRoutesFromNSVpp(conn *urpc.Client, nsPath string, hardwareGSO bool, softwareGSO bool, numNetworkChannels int, mifcfg memif.Config) error {
 	// Join the network namespace that we will be copying.
 	restore, err := joinNetNS(nsPath)
 	if err != nil {
@@ -367,11 +367,12 @@ func createInterfacesAndRoutesFromNSVpp(conn *urpc.Client, nsPath string, hardwa
 		link := boot.MemifLink{
 			Name:               iface.Name,
 			// TODO: user configured
-			ID:                 0,
-			NumQueuePairs:      1,
-			Log2RingSize:       10,
-			PacketBufferSize:   2048,
-			MTU:                iface.MTU,
+			ID:                 mifcfg.ID,
+			IsMaster:           mifcfg.IsMaster,
+			NumQueuePairs:      mifcfg.NumQueuePairs,
+			Log2RingSize:       mifcfg.Log2RingSize,
+			PacketBufferSize:   mifcfg.PacketBufferSize,
+			MTU:                mifcfg.MTU,
 			Routes:             routes,
 		}
 
@@ -387,12 +388,8 @@ func createInterfacesAndRoutesFromNSVpp(conn *urpc.Client, nsPath string, hardwa
 		if err != nil {
 			return fmt.Errorf("failed to create socket for %s : %v", iface.Name, err)
 		}
-		usa := &syscall.SockaddrUnix{Name: memifSocketFile}
-		// Connect to listener socket
-		err = syscall.Connect(fd, usa)
-		if err != nil {
-			return fmt.Errorf("failed to connect socket %s : %v", memifSocketFile, err)
-		}
+		usa := &syscall.SockaddrUnix{Name: mifcfg.MemifSocketFile}
+
 		// create go File from socket
 		deviceFile := os.NewFile(uintptr(fd), "memif-device-socket")
 		if deviceFile == nil {
@@ -407,29 +404,50 @@ func createInterfacesAndRoutesFromNSVpp(conn *urpc.Client, nsPath string, hardwa
 
 		args.FilePayload.Files = append(args.FilePayload.Files, socketEntry.deviceFile)
 
-		// Create shared memory file
-		mfd, err := memif.MemfdCreate()
-		if err != nil {
-			return err
-		}
-		// create go File from memfd
-		memfdFile := os.NewFile(uintptr(mfd), "memfd-dev")
-		if memfdFile == nil {
-			return fmt.Errorf("NewFile failed %s", iface.Name)
-		}
-		args.FilePayload.Files = append(args.FilePayload.Files, memfdFile)
-
-		// Create eventfd for each queue
-		for i := 0; i < int(link.NumQueuePairs * 2); i++ {
-			efd, err := memif.EventFd()
+		if mifcfg.IsMaster {
+			err = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_PASSCRED, 1)
+			if err != nil {
+				return fmt.Errorf("failed to set socket option %s : %v", mifcfg.MemifSocketFile, err)
+			}
+			err = syscall.Bind(fd, usa)
+			if err != nil {
+				return fmt.Errorf("failed to bind socket %s : %v", mifcfg.MemifSocketFile, err)
+			}
+			err = syscall.Listen(fd, syscall.SOMAXCONN)
+			if err != nil {
+				return fmt.Errorf("failed to listen on socket %s : %v", mifcfg.MemifSocketFile, err)
+			}
+		} else {
+			// Connect to listener socket
+			err = syscall.Connect(fd, usa)
+			if err != nil {
+				return fmt.Errorf("failed to connect socket %s : %v", mifcfg.MemifSocketFile, err)
+			}
+			// Create shared memory file
+			mfd, err := memif.MemfdCreate()
 			if err != nil {
 				return err
 			}
-			eventFile := os.NewFile(uintptr(efd), "eventfd" + string(i))
-			if eventFile == nil {
+			//return fmt.Errorf(strconv.Itoa(mfd))
+			// create go File from memfd
+			memfdFile := os.NewFile(uintptr(mfd), "memfd-dev")
+			if memfdFile == nil {
 				return fmt.Errorf("NewFile failed %s", iface.Name)
 			}
-			args.FilePayload.Files = append(args.FilePayload.Files, eventFile)
+			args.FilePayload.Files = append(args.FilePayload.Files, memfdFile)
+
+			// Create eventfd for each queue
+			for i := 0; i < int(link.NumQueuePairs * 2); i++ {
+				efd, err := memif.EventFd()
+				if err != nil {
+					return err
+				}
+				eventFile := os.NewFile(uintptr(efd), "eventfd" + string(i))
+				if eventFile == nil {
+					return fmt.Errorf("NewFile failed %s", iface.Name)
+				}
+				args.FilePayload.Files = append(args.FilePayload.Files, eventFile)
+			}
 		}
 
 		if link.GSOMaxSize == 0 && softwareGSO {

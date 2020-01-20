@@ -21,6 +21,7 @@ import (
 
 	"gvisor.dev/gvisor/pkg/refs"
 	"gvisor.dev/gvisor/pkg/sentry/watchdog"
+	"gvisor.dev/gvisor/pkg/tcpip/link/memif"
 )
 
 // FileAccessType tells how the filesystem is accessed.
@@ -246,8 +247,8 @@ type Config struct {
 	// write to workaround overlayfs limitation on kernels before 4.19.
 	OverlayfsStaleRead bool
 
-	// Path to memif socket. Used to connect to VPP.
-	MemifSocketFile string
+	// Memif configuration. Used with Sandbox Vpp network
+	MemifConfig memif.Config
 
 	// TestOnlyAllowRunAsCurrentUserWithoutChroot should only be used in
 	// tests. It allows runsc to start the sandbox process as the current
@@ -292,7 +293,13 @@ func (c *Config) ToFlags() []string {
 		"--gso=" + strconv.FormatBool(c.HardwareGSO),
 		"--software-gso=" + strconv.FormatBool(c.SoftwareGSO),
 		"--overlayfs-stale-read=" + strconv.FormatBool(c.OverlayfsStaleRead),
-		"--memif-socket-file=" + c.MemifSocketFile,
+		"--memif-socket-file=" + c.MemifConfig.MemifSocketFile,
+		"--memif-id=" + strconv.Itoa(int(c.MemifConfig.ID)),
+		"--memif-is-master=" + strconv.FormatBool(c.MemifConfig.IsMaster),
+		"--memif-num-queue-pairs=" + strconv.Itoa(int(c.MemifConfig.NumQueuePairs)),
+		"--memif-log2-ring-size=" + strconv.Itoa(int(c.MemifConfig.Log2RingSize)),
+		"--memif-packet-buffer-size=" + strconv.Itoa(int(c.MemifConfig.PacketBufferSize)),
+		"--memif-mtu=" + strconv.Itoa(c.MemifConfig.MTU),
 	}
 	// Only include these if set since it is never to be used by users.
 	if c.TestOnlyAllowRunAsCurrentUserWithoutChroot {

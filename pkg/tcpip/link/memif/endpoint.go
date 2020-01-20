@@ -91,6 +91,16 @@ type linkDispatcher interface {
 	dispatch() (bool, *tcpip.Error)
 }
 
+type Config struct {
+	ID                 uint32
+	IsMaster           bool
+	NumQueuePairs      uint16
+	Log2RingSize       uint8
+	PacketBufferSize   uint32
+	MTU                int
+	MemifSocketFile    string
+}
+
 // private data
 type endpoint struct {
 	// Control channel fd
@@ -99,6 +109,8 @@ type endpoint struct {
 	memfdFd int
 
 	id uint32
+
+	isMaster bool
 
 	// memif configuration
 	config memifConfig
@@ -159,6 +171,9 @@ type Options struct {
 
 	// Unique id (unique per control channel)
 	ID uint32
+
+	// Is the interface in master mode
+	IsMaster bool
 
 	// MTU is the mtu to use for this endpoint.
 	MTU uint32
@@ -227,7 +242,7 @@ func New(opts *Options) (stack.LinkEndpoint, error) {
 		caps |= stack.CapabilityDisconnectOk
 	}
 
-	if len(opts.FDs) < int(2 + opts.NumQueuePairs * 2) {
+	if !opts.IsMaster && (len(opts.FDs) < int(2 + opts.NumQueuePairs * 2)) {
 		return nil, fmt.Errorf("Not enough file descriptors")
 	}
 
@@ -240,8 +255,9 @@ func New(opts *Options) (stack.LinkEndpoint, error) {
 
 	e := &endpoint {
 		controlChannelFd:   opts.FDs[0],
-		memfdFd:	    opts.FDs[1],
+		memfdFd:	    -1,
 		id:                 opts.ID,
+		isMaster:           opts.IsMaster,
 		config:             config,
 		mtu:                opts.MTU,
 		caps:               caps,
@@ -251,31 +267,34 @@ func New(opts *Options) (stack.LinkEndpoint, error) {
 		rxMode:             opts.RxMode,
 	}
 
-	// assign endpoint and interrupt fd to queues
-	for i := uint16(0); i < opts.NumQueuePairs; i++ {
-		txq := queue {
-			ringType: ringTypeS2M,
-			log2RingSize: 0,
-			region: 0,
-			e: e,
-			ringOffset: 0,
-			lastHead: 0,
-			lastTail: 0,
-			interruptFd: opts.FDs[2 + i],
-		}
-		e.txQueues = append(e.txQueues, txq)
+	if !e.isMaster {
+		e.memfdFd = opts.FDs[1]
+		// assign endpoint and interrupt fd to queues
+		for i := uint16(0); i < opts.NumQueuePairs; i++ {
+			txq := queue {
+				ringType: ringTypeS2M,
+				log2RingSize: 0,
+				region: 0,
+				e: e,
+				ringOffset: 0,
+				lastHead: 0,
+				lastTail: 0,
+				interruptFd: opts.FDs[2 + i],
+			}
+			e.txQueues = append(e.txQueues, txq)
 
-		rxq := queue {
-			ringType: ringTypeM2S,
-			log2RingSize: 0,
-			region: 0,
-			e: e,
-			ringOffset: 0,
-			lastHead: 0,
-			lastTail: 0,
-			interruptFd: opts.FDs[2 + i + opts.NumQueuePairs],
+			rxq := queue {
+				ringType: ringTypeM2S,
+				log2RingSize: 0,
+				region: 0,
+				e: e,
+				ringOffset: 0,
+				lastHead: 0,
+				lastTail: 0,
+				interruptFd: opts.FDs[2 + i + opts.NumQueuePairs],
+			}
+			e.rxQueues = append(e.rxQueues, rxq)
 		}
-		e.rxQueues = append(e.rxQueues, rxq)
 	}
 
 	err := e.Connect()
@@ -304,7 +323,7 @@ type virtioNetHdr struct {
 	csumOffset uint16
 }
 
-// dispatchLoop reads packets from the file descriptor in a loop and dispatches
+// dispatchLoop reads packets from the shared memory in a loop and dispatches
 // them to the network stack.
 func (e *endpoint) dispatchLoop(inboundDispatcher linkDispatcher) *tcpip.Error {
 	for {
@@ -318,7 +337,7 @@ func (e *endpoint) dispatchLoop(inboundDispatcher linkDispatcher) *tcpip.Error {
 	}
 }
 
-// Attach launches the goroutine that reads packets from the file descriptor and
+// Attach launches the goroutine that reads packets from the shared memory and
 // dispatches them via the provided dispatcher.
 func (e *endpoint) Attach(dispatcher stack.NetworkDispatcher) {
 	e.dispatcher = dispatcher

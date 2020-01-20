@@ -36,6 +36,7 @@ import (
 	"gvisor.dev/gvisor/runsc/boot"
 	"gvisor.dev/gvisor/runsc/cmd"
 	"gvisor.dev/gvisor/runsc/specutils"
+	"gvisor.dev/gvisor/pkg/tcpip/link/memif"
 )
 
 var (
@@ -83,6 +84,12 @@ var (
 	referenceLeakMode  = flag.String("ref-leak-mode", "disabled", "sets reference leak check mode: disabled (default), log-names, log-traces.")
 
 	memifSocketFile    = flag.String("memif-socket-file", "/run/vpp/memif.sock", "memif socket file path")
+	memifID    = flag.Int("memif-id", 0, "unique id, used to match endpoints using same socket")
+	memifIsMaster    = flag.Bool("memif-is-master", false, "interface role")
+	memifNumQueuePairs    = flag.Int("memif-num-queue-pairs", 1, "number of queue pairs")
+	memifLog2RingSize    = flag.Int("memif-log2-ring-size", 10, "log2 ring size")
+	memifPacketBufferSize    = flag.Int("memif-packet-buffer-size", 32768, "single packet buffer size")
+	memifMTU    = flag.Int("memif-mtu", 65536, "MTU")
 
 	// Test flags, not to be used outside tests, ever.
 	testOnlyAllowRunAsCurrentUserWithoutChroot = flag.Bool("TESTONLY-unsafe-nonroot", false, "TEST ONLY; do not ever use! This skips many security measures that isolate the host from the sandbox.")
@@ -226,7 +233,15 @@ func main() {
 		AlsoLogToStderr:    *alsoLogToStderr,
 		ReferenceLeakMode:  refsLeakMode,
 		OverlayfsStaleRead: *overlayfsStaleRead,
-		MemifSocketFile:     *memifSocketFile,
+		MemifConfig:        memif.Config{
+			ID:                 uint32(*memifID),
+			IsMaster:           *memifIsMaster,
+			NumQueuePairs:      uint16(*memifNumQueuePairs),
+			Log2RingSize:       uint8(*memifLog2RingSize),
+			PacketBufferSize:   uint32(*memifPacketBufferSize),
+			MTU:                *memifMTU,
+			MemifSocketFile:    *memifSocketFile,
+		},
 
 		TestOnlyAllowRunAsCurrentUserWithoutChroot: *testOnlyAllowRunAsCurrentUserWithoutChroot,
 		TestOnlyTestNameEnv:                        *testOnlyTestNameEnv,
