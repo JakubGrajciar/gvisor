@@ -1,4 +1,4 @@
-// Copyright 2019 Cisco Systems Inc.
+// Copyright 2019-2020 Cisco Systems Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -80,11 +80,6 @@ type queue struct {
 	interruptFd int
 }
 
-type msg struct {
-	Buffer *bytes.Buffer
-	Fd int
-}
-
 // linkDispatcher reads packets from the shared memory and dispatches them to the
 // NetworkDispatcher.
 type linkDispatcher interface {
@@ -103,9 +98,6 @@ type Config struct {
 
 // private data
 type endpoint struct {
-	// Control channel fd
-	controlChannelFd int
-
 	memfdFd int
 
 	id uint32
@@ -126,8 +118,6 @@ type endpoint struct {
 	txQueues []queue
 	rxQueues []queue
 
-	msgQueue []msg
-
 	connected bool
 
 	// mtu (maximum transmission unit) is the maximum size of a packet.
@@ -146,6 +136,8 @@ type endpoint struct {
 	// closed is a function to be called when the FD's peer (if any) closes
 	// its end of the communication pipe.
 	closed func(*tcpip.Error)
+
+	controlChannel     *controlChannel
 
 	inboundDispatchers []linkDispatcher
 	dispatcher         stack.NetworkDispatcher
@@ -254,20 +246,33 @@ func New(opts *Options) (stack.LinkEndpoint, error) {
 	}
 
 	e := &endpoint {
-		controlChannelFd:   opts.FDs[0],
 		memfdFd:	    -1,
 		id:                 opts.ID,
 		isMaster:           opts.IsMaster,
 		config:             config,
 		mtu:                opts.MTU,
 		caps:               caps,
+		// TODO: closedfunc...
 		closed:             opts.ClosedFunc,
 		addr:               opts.Address,
+		// TODO: maybe we dont need eth header?
 		hdrSize:            hdrSize,
 		rxMode:             opts.RxMode,
 	}
 
-	if !e.isMaster {
+	if e.isMaster {
+		// FIXME: use go-routine
+		listener, err := e.newListener(opts.FDs[0], -1)
+		if err != nil {
+			return nil, err
+		}
+		// will block until connected
+		err = listener.poll()
+		if err != nil {
+			return nil, err
+		}
+		// Assert we received a connection request
+	} else {
 		e.memfdFd = opts.FDs[1]
 		// assign endpoint and interrupt fd to queues
 		for i := uint16(0); i < opts.NumQueuePairs; i++ {
@@ -295,19 +300,25 @@ func New(opts *Options) (stack.LinkEndpoint, error) {
 			}
 			e.rxQueues = append(e.rxQueues, rxq)
 		}
-	}
 
-	err := e.Connect()
-	if err != nil {
-		return nil, fmt.Errorf("Failed to connect memif: %s", err)
-	}
-
-	for i := range e.rxQueues {
-		inboundDispatcher, err := e.newQueueDispatcher(&e.rxQueues[i])
+		control, err := e.newControlChannel(opts.FDs[0], -1)
 		if err != nil {
-			return nil, fmt.Errorf("newQueueDispatcher: %v", err)
+			return nil, err
 		}
-		e.inboundDispatchers = append(e.inboundDispatchers, inboundDispatcher)
+
+		// FIXME: use go-routine so that memif doesn't block
+		for !e.connected {
+			err = control.poll()
+			if err != nil {
+				// TODO: disconnect
+				return nil, err
+			}
+		}
+	}
+
+	// FIXME: remove once connection establishment is handled in go-routines
+	if !e.connected {
+		return nil, fmt.Errorf("Failed to connect")
 	}
 
 	return e, nil
@@ -330,6 +341,7 @@ func (e *endpoint) dispatchLoop(inboundDispatcher linkDispatcher) *tcpip.Error {
 		cont, err := inboundDispatcher.dispatch()
 		if err != nil || !cont {
 			if e.closed != nil {
+				// TODO: disconnect
 				e.closed(err)
 			}
 			return err
@@ -337,10 +349,9 @@ func (e *endpoint) dispatchLoop(inboundDispatcher linkDispatcher) *tcpip.Error {
 	}
 }
 
-// Attach launches the goroutine that reads packets from the shared memory and
+// enableInboundDispatchers launches the goroutine that reads packets from the shared memory and
 // dispatches them via the provided dispatcher.
-func (e *endpoint) Attach(dispatcher stack.NetworkDispatcher) {
-	e.dispatcher = dispatcher
+func (e *endpoint) enableInboundDispatchers() {
 	// Link endpoints are not savable. When transportation endpoints are
 	// saved, they stop sending outgoing packets and all incoming packets
 	// are rejected.
@@ -351,6 +362,13 @@ func (e *endpoint) Attach(dispatcher stack.NetworkDispatcher) {
 			e.wg.Done()
 		}(i)
 	}
+}
+
+// Attach attaches the network dispatcher
+func (e *endpoint) Attach(dispatcher stack.NetworkDispatcher) {
+	e.dispatcher = dispatcher
+
+	e.enableInboundDispatchers()
 }
 
 // IsAttached implements stack.LinkEndpoint.IsAttached.
@@ -521,6 +539,70 @@ func (e *endpoint) initializeQueues() (err error) {
 		q := &e.rxQueues[qid]
 		q.log2RingSize = e.run.log2RingSize
 		q.ringOffset = e.getRingOffset(0, ringTypeM2S, qid)
+
+		inboundDispatcher, err := e.newQueueDispatcher(q)
+		if err != nil {
+			return fmt.Errorf("newQueueDispatcher: %v", err)
+		}
+		e.inboundDispatchers = append(e.inboundDispatchers, inboundDispatcher)
+	}
+
+	return nil
+}
+
+func (e *endpoint) Connect() (err error) {
+	for rid, _ := range e.regions {
+		r := &e.regions[rid]
+		r.data, err = syscall.Mmap(r.Fd, 0, int(r.Size), syscall.PROT_READ | syscall.PROT_WRITE, syscall.MAP_SHARED)
+		if err != nil {
+			return fmt.Errorf("Mmap: %s", err)
+		}
+	}
+
+	for qid, _ := range e.txQueues {
+		q := &e.txQueues[qid]
+		var ring Ring
+
+		buf := bytes.NewReader(e.regions[0].data[q.ringOffset:q.ringOffset + ringSize])
+		err = binary.Read(buf, binary.LittleEndian, &ring)
+		if err != nil {
+			return err
+		}
+
+		if ring.Cookie != Cookie {
+			return fmt.Errorf("Wrong cookie")
+		}
+
+		q.lastHead = 0
+		q.lastTail = 0
+	}
+
+	for qid, _ := range e.rxQueues {
+		q := &e.rxQueues[qid]
+		var ring Ring
+
+		buf := bytes.NewReader(e.regions[0].data[q.ringOffset:q.ringOffset + ringSize])
+		err = binary.Read(buf, binary.LittleEndian, &ring)
+		if err != nil {
+			return err
+		}
+
+		if ring.Cookie != Cookie {
+			return fmt.Errorf("Wrong cookie")
+		}
+
+		q.lastHead = 0
+		q.lastTail = 0
+
+		inboundDispatcher, err := e.newQueueDispatcher(q)
+		if err != nil {
+			return fmt.Errorf("newQueueDispatcher: %v", err)
+		}
+		e.inboundDispatchers = append(e.inboundDispatchers, inboundDispatcher)
+	}
+
+	if e.IsAttached() {
+		e.enableInboundDispatchers()
 	}
 
 	return nil

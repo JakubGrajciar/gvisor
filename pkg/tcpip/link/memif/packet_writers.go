@@ -1,4 +1,4 @@
-// Copyright 2019 Cisco Systems Inc.
+// Copyright 2019-2020 Cisco Systems Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -42,14 +42,20 @@ func (e *endpoint) writePacket(qid uint16, b0 []byte, b1 []byte, b2 []byte) *tcp
 	n := 0
 	var err error = nil
 	var d Desc
+	var slot uint16
+	var nFree uint16
+	var packetBufferSize uint32 = e.run.packetBufferSize
 
 	// block until all buffers are transmitted
+	// timeout?
 	for {
-		nFree := q.readTail() - q.lastTail
-		q.lastTail += nFree
-		// S2M ring, as this is Slave interface
-		slot := q.readHead()
-		nFree = rSize - slot + q.lastTail
+		if e.isMaster {
+			slot = q.readTail()
+			nFree = q.readHead() - slot
+		} else {
+			slot = q.readHead()
+			nFree = rSize - slot + q.readTail()
+		}
 
 		// make sure there are enough buffers available
 		// packet buffer size = 32768, MTU = 65536
@@ -65,10 +71,13 @@ func (e *endpoint) writePacket(qid uint16, b0 []byte, b1 []byte, b2 []byte) *tcp
 		// reset flags
 		d.Flags = 0
 		// reset length
+		if e.isMaster {
+			packetBufferSize = d.Length
+		}
 		d.Length = 0
 
 		// write packet into memif buffer
-		q.writeBuffer(&d, b0)
+		q.writeBuffer(&d, b0, packetBufferSize)
 		/*
 		if n < len(b0) {
 			d.Flags |= descFlagNext
@@ -90,7 +99,7 @@ func (e *endpoint) writePacket(qid uint16, b0 []byte, b1 []byte, b2 []byte) *tcp
 		*/
 
 		if len(b1) > 0 {
-			n = q.writeBuffer(&d, b1)
+			n = q.writeBuffer(&d, b1, packetBufferSize)
 			if n < len(b1) {
 				d.Flags |= descFlagNext
 				q.writeDesc(slot & mask, &d)
@@ -104,9 +113,12 @@ func (e *endpoint) writePacket(qid uint16, b0 []byte, b1 []byte, b2 []byte) *tcp
 				// reset flags
 				d.Flags = 0
 				// reset length
+				if e.isMaster {
+					packetBufferSize = d.Length
+				}
 				d.Length = 0
 
-				n += q.writeBuffer(&d, b1[n:])
+				n += q.writeBuffer(&d, b1[n:], packetBufferSize)
 			}
 		}
 		/*
@@ -138,8 +150,11 @@ func (e *endpoint) writePacket(qid uint16, b0 []byte, b1 []byte, b2 []byte) *tcp
 		// increment counters
 		slot++
 
-		// S2M ring, as this is Slave interface
-		q.writeHead(slot)
+		if e.isMaster {
+			q.writeTail(slot)
+		} else {
+			q.writeHead(slot)
+		}
 
 		isInterrupt, _ := q.isInterrupt()
 		if isInterrupt {
@@ -149,8 +164,6 @@ func (e *endpoint) writePacket(qid uint16, b0 []byte, b1 []byte, b2 []byte) *tcp
 
 		return nil
 	}
-
-	return nil
 }
 
 // These constants are declared in linux/virtio_net.h.

@@ -1,3 +1,5 @@
+// Copyright 2019-2020 Cisco Systems Inc.
+
 package memif
 
 //go:noescape

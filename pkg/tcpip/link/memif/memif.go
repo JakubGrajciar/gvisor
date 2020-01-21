@@ -1,4 +1,4 @@
-// Copyright 2019 Cisco Systems Inc.
+// Copyright 2019-2020 Cisco Systems Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,8 +17,6 @@ package memif
 import (
 	"bytes"
 	"encoding/binary"
-
-	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 )
 
 const Cookie = 0x3E31F20
@@ -106,7 +104,7 @@ type MsgHello struct {
 	MaxLog2RingSize uint8
 }
 
-type msgInit struct {
+type MsgInit struct {
 	Version uint16
 	Id uint32
 	Mode interfaceMode
@@ -115,12 +113,12 @@ type msgInit struct {
 	Name [32]byte
 }
 
-type msgAddRegion struct {
+type MsgAddRegion struct {
 	Index uint16
 	Size uint64
 }
 
-type msgAddRing struct {
+type MsgAddRing struct {
 	Flags uint16
 	Index uint16
 	Region uint16
@@ -129,17 +127,17 @@ type msgAddRing struct {
 	PrivateHdrSize uint16
 }
 
-type msgConnect struct {
+type MsgConnect struct {
 	// interface name
 	Name [32]byte
 }
 
-type msgConnected struct {
+type MsgConnected struct {
 	// interface name
 	Name [32]byte
 }
 
-type msgDisconnect struct {
+type MsgDisconnect struct {
 	Code uint32
 	String [96]byte
 }
@@ -182,15 +180,10 @@ func (q *queue) writeDesc(slot uint16, d *Desc) (err error) {
 }
 
 // write contents of buf into shm buffer, return number of bytes written
-func (q *queue) writeBuffer(d *Desc, buf []byte) (n int) {
-	nBytes := copy(q.e.regions[q.region].data[d.Offset + d.Length:d.Offset + q.e.run.packetBufferSize], buf)
+func (q *queue) writeBuffer(d *Desc, buf []byte, packetBufferSize uint32) (n int) {
+	nBytes := copy(q.e.regions[d.Region].data[d.Offset + d.Length:d.Offset + packetBufferSize], buf)
 	d.Length += uint32(nBytes)
 	return nBytes
-}
-
-// returns number of bytes copied
-func (q *queue) readBuffer(d *Desc) (buffer.View) {
-	return buffer.NewViewFromBytes(q.e.regions[q.region].data[d.Offset:d.Offset + d.Length])
 }
 
 // TODO: investigate atomic/store barrier

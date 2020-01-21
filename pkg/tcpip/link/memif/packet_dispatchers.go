@@ -1,4 +1,4 @@
-// Copyright 2019 Cisco Systems Inc.
+// Copyright 2019-2020 Cisco Systems Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -79,10 +79,16 @@ func (d *queueDispatcher) dispatch() (bool, *tcpip.Error) {
 	rSize := uint16(1 << d.q.log2RingSize)
 	mask := rSize - 1
 	n := 0
+	var slot uint16
+	var lastSlot uint16
 
-	// M2S only
-	slot := d.q.lastTail
-	lastSlot := d.q.readTail()
+	if d.q.e.isMaster {
+		slot = d.q.lastHead
+		lastSlot = d.q.readHead()
+	} else {
+		slot = d.q.lastTail
+		lastSlot = d.q.readTail()
+	}
 
 	nSlots := lastSlot - slot
 	views := make([]buffer.View, nSlots)
@@ -150,21 +156,25 @@ func (d *queueDispatcher) dispatch() (bool, *tcpip.Error) {
 
 	views = nil
 
-	d.q.lastTail = slot;
+	if d.q.e.isMaster {
+		d.q.lastHead = slot
+		d.q.writeTail(slot)
+	} else {
+		d.q.lastTail = slot
 
-	head := d.q.readHead()
-	nSlots = rSize - head + d.q.lastTail;
+		head := d.q.readHead()
+		nSlots = rSize - head + d.q.lastTail;
 
-	for nSlots > 0 {
-		desc, _ := d.q.readDesc(head & mask)
-		desc.Length = d.q.e.run.packetBufferSize
-		d.q.writeDesc(head & mask, &desc)
-		head++
-		nSlots--
+		for nSlots > 0 {
+			desc, _ := d.q.readDesc(head & mask)
+			desc.Length = d.q.e.run.packetBufferSize
+			d.q.writeDesc(head & mask, &desc)
+			head++
+			nSlots--
+		}
+		d.q.writeHead(head)
 	}
-	d.q.writeHead(head)
 
-	//runtime.Gosched()
 /*
 	event := rawfile.PollEvent{
 		FD:     int32(d.q.interruptFd),

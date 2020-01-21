@@ -1,3 +1,5 @@
+// Copyright 2019-2020 Cisco Systems Inc.
+
 #include "textflag.h"
 
 // uint16 atomicload16(uint64 volatile* addr);

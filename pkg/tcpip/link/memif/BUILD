@@ -8,9 +8,9 @@ go_library(
     srcs = [
         "endpoint.go",
 	"endpoint_unsafe.go",
-	"socket.go",
-	"socket_unsafe.go",
 	"memif.go",
+	"control_channel.go",
+	"control_channel_unsafe.go",
 	"packet_dispatchers.go",
 	"packet_writers.go",
 	"atomic16_amd64.s",
