@@ -25,7 +25,7 @@ package memif
 
 import (
 	"syscall"
-//	"fmt"
+	"fmt"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -46,6 +46,7 @@ func (e *endpoint) writePacket(qid uint16, b0 []byte, b1 []byte, b2 []byte) *tcp
 	var nFree uint16
 	var packetBufferSize uint32 = e.run.packetBufferSize
 
+retry:
 	// block until all buffers are transmitted
 	// timeout?
 	for {
@@ -59,7 +60,7 @@ func (e *endpoint) writePacket(qid uint16, b0 []byte, b1 []byte, b2 []byte) *tcp
 
 		// make sure there are enough buffers available
 		// packet buffer size = 32768, MTU = 65536
-		if nFree < 2 {
+		if nFree == 0 {
 			continue
 		}
 
@@ -77,9 +78,12 @@ func (e *endpoint) writePacket(qid uint16, b0 []byte, b1 []byte, b2 []byte) *tcp
 		d.Length = 0
 
 		// write packet into memif buffer
-		q.writeBuffer(&d, b0, packetBufferSize)
-		/*
-		if n < len(b0) {
+		n = q.writeBuffer(&d, b0, packetBufferSize)
+		for n < len(b0) {
+			nFree--
+			if nFree == 0 {
+				goto retry
+			}
 			d.Flags |= descFlagNext
 			q.writeDesc(slot & mask, &d)
 			slot++
@@ -92,15 +96,21 @@ func (e *endpoint) writePacket(qid uint16, b0 []byte, b1 []byte, b2 []byte) *tcp
 			// reset flags
 			d.Flags = 0
 			// reset length
+			if e.isMaster {
+				packetBufferSize = d.Length
+			}
 			d.Length = 0
 
-			n += q.writeBuffer(&d, b0[n:])
+			n += q.writeBuffer(&d, b0[n:], packetBufferSize)
 		}
-		*/
 
 		if len(b1) > 0 {
 			n = q.writeBuffer(&d, b1, packetBufferSize)
-			if n < len(b1) {
+			for n < len(b1) {
+				nFree--
+				if nFree == 0 {
+					goto retry
+				}
 				d.Flags |= descFlagNext
 				q.writeDesc(slot & mask, &d)
 				slot++
@@ -121,13 +131,17 @@ func (e *endpoint) writePacket(qid uint16, b0 []byte, b1 []byte, b2 []byte) *tcp
 				n += q.writeBuffer(&d, b1[n:], packetBufferSize)
 			}
 		}
-		/*
+
 		if len(b2) > 0 {
-			n = q.writeBuffer(&d, b2)
+			n = q.writeBuffer(&d, b2, packetBufferSize)
 			for n < len(b2) {
+				nFree--
+				if nFree == 0 {
+					goto retry
+				}
+				d.Flags |= descFlagNext
 				q.writeDesc(slot & mask, &d)
 				slot++
-				nFree--
 
 				// copy descriptor from shm
 				d, err = q.readDesc(slot & mask)
@@ -137,12 +151,14 @@ func (e *endpoint) writePacket(qid uint16, b0 []byte, b1 []byte, b2 []byte) *tcp
 				// reset flags
 				d.Flags = 0
 				// reset length
+				if e.isMaster {
+					packetBufferSize = d.Length
+				}
 				d.Length = 0
 
-				n += q.writeBuffer(&d, b2[n:])
+				n += q.writeBuffer(&d, b2[n:], packetBufferSize)
 			}
 		}
-		*/
 
 		// copy descriptor to shm
 		q.writeDesc(slot & mask, &d)
@@ -192,7 +208,7 @@ func (e *endpoint) WritePacket(r *stack.Route, gso *stack.GSO, protocol tcpip.Ne
 		}
 		eth.Encode(ethHdr)
 	}
-/*
+
 	if e.Capabilities()&stack.CapabilityHardwareGSO != 0 {
 		// Disable for now
 		vnetHdr := virtioNetHdr{}
@@ -219,15 +235,23 @@ func (e *endpoint) WritePacket(r *stack.Route, gso *stack.GSO, protocol tcpip.Ne
 
 		return e.writePacket(0, vnetHdrBuf, pkt.Header.View(), pkt.Data.ToView())
 	}
-*/
 
 	return e.writePacket(0, pkt.Header.View(), pkt.Data.ToView(), nil)
 }
 
 func (e *endpoint) WritePackets(r *stack.Route, gso *stack.GSO, hdrs []stack.PacketDescriptor, payload buffer.VectorisedView, protocol tcpip.NetworkProtocolNumber) (int, *tcpip.Error) {
+	// only single queue supported
+	q := e.txQueues[0]
+	rSize := uint16(1 << q.log2RingSize)
+	mask := rSize - 1
+	var err error = nil
+	var desc Desc
+	var slot uint16
+	var nFree uint16
+	var packetBufferSize uint32 = e.run.packetBufferSize
 	var ethHdrBuf []byte
-	// hdr + data
-	iovLen := 2
+	var nBytes int
+
 	if e.hdrSize > 0 {
 		// Add ethernet header if needed.
 		ethHdrBuf = make([]byte, header.EthernetMinimumSize)
@@ -244,20 +268,34 @@ func (e *endpoint) WritePackets(r *stack.Route, gso *stack.GSO, hdrs []stack.Pac
 			ethHdr.SrcAddr = e.addr
 		}
 		eth.Encode(ethHdr)
-		iovLen++
 	}
 
+	n := len(hdrs)
 	views := payload.Views()
+
+// FIXME: timeout or limit retry count
+retry:
+	if e.isMaster {
+		slot = q.readTail()
+		nFree = q.readHead() - slot
+	} else {
+		slot = q.readHead()
+		nFree = rSize - slot + q.readTail()
+	}
+
+	// assert buffer length: memif 2048 packet < 1500
+	if nFree < uint16(n) {
+		panic("aaa")
+		goto retry
+	}
 
 	viewIdx := 0
 	viewOff := 0
 	off := 0
 	nextOff := 0
-	packets := 0
 	for i := range hdrs {
 		packetSize := hdrs[i].Size
 		hdr := &hdrs[i].Hdr
-
 		off = hdrs[i].Off
 		if off != nextOff {
 			// We stop in a different point last time.
@@ -277,9 +315,86 @@ func (e *endpoint) WritePackets(r *stack.Route, gso *stack.GSO, hdrs []stack.Pac
 		}
 		nextOff = off + packetSize
 
+		// copy descriptor from shm
+		desc, err = q.readDesc(slot & mask)
+		if err != nil {
+			return i, tcpip.ErrInvalidEndpointState
+		}
+		nFree--
+		// reset flags
+		desc.Flags = 0
+		// reset length
+		if e.isMaster {
+			packetBufferSize = desc.Length
+		}
+		desc.Length = 0
+
+		if ethHdrBuf != nil {
+			q.writeBuffer(&desc, ethHdrBuf, packetBufferSize)
+			// FIXME: assert buffer size larger than e.hdrSize
+		}
+
+		hdrView := hdr.View()
+		nBytes = q.writeBuffer(&desc, hdrView, packetBufferSize)
+		for nBytes < len(hdrView) {
+			if nFree == 0 {
+				panic("aaa")
+			}
+			desc.Flags |= descFlagNext
+			q.writeDesc(slot & mask, &desc)
+			slot++
+
+			// copy descriptor from shm
+			desc, err = q.readDesc(slot & mask)
+			if err != nil {
+				return i, tcpip.ErrInvalidEndpointState
+			}
+			nFree--
+			// reset flags
+			desc.Flags = 0
+			// reset length
+			if e.isMaster {
+				packetBufferSize = desc.Length
+			}
+			desc.Length = 0
+
+			nBytes += q.writeBuffer(&desc, hdrView[nBytes:], packetBufferSize)
+		}
+
 		for packetSize > 0 {
 			v := views[viewIdx]
 			s := len(v) - viewOff
+			copyBytes := packetSize
+			if copyBytes > s {
+				copyBytes = s
+			}
+			// Copy views[viewIdx][viewOff] to shm
+			nBytes = q.writeBuffer(&desc, v[viewOff:viewOff + copyBytes], packetBufferSize)
+			for nBytes < copyBytes {
+				if nFree == 0 {
+					panic("aaa")
+				}
+				desc.Flags |= descFlagNext
+				q.writeDesc(slot & mask, &desc)
+				slot++
+
+				// copy descriptor from shm
+				desc, err = q.readDesc(slot & mask)
+				if err != nil {
+					return i, tcpip.ErrInvalidEndpointState
+				}
+				nFree--
+				// reset flags
+				desc.Flags = 0
+				// reset length
+				if e.isMaster {
+					packetBufferSize = desc.Length
+				}
+				desc.Length = 0
+
+				nBytes += q.writeBuffer(&desc, v[viewOff + nBytes:viewOff + copyBytes], packetBufferSize)
+			}
+
 			if s <= packetSize {
 				viewIdx++
 				viewOff = 0
@@ -290,15 +405,24 @@ func (e *endpoint) WritePackets(r *stack.Route, gso *stack.GSO, hdrs []stack.Pac
 			packetSize -= s
 		}
 
-		v := views[viewIdx]
-		err := e.writePacket(0, ethHdrBuf, hdr.View(), v[viewOff:])
-		if err != nil {
-			return packets, err
-		}
-		packets++
+		q.writeDesc(slot & mask, &desc)
+		nFree--
+		slot++
 	}
 
-	return packets, nil
+	if e.isMaster {
+		q.writeTail(slot)
+	} else {
+		q.writeHead(slot)
+	}
+
+	isInterrupt, _ := q.isInterrupt()
+	if isInterrupt {
+		b := []byte{1}
+		syscall.Write(q.interruptFd, b)
+	}
+
+	return n, nil
 }
 
 func (e *endpoint) WriteRawPacket(vv buffer.VectorisedView) *tcpip.Error {

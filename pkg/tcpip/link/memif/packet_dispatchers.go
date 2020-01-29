@@ -74,7 +74,7 @@ func epollPwait(fd int, to int) (err error) {
 }
 */
 
-// dispatch reads one packet from the shm and dispatches it.
+// dispatch reads packets from the shm and dispatches them.
 func (d *queueDispatcher) dispatch() (bool, *tcpip.Error) {
 	rSize := uint16(1 << d.q.log2RingSize)
 	mask := rSize - 1
@@ -99,29 +99,29 @@ func (d *queueDispatcher) dispatch() (bool, *tcpip.Error) {
 			// copy descriptor from shm
 			desc, _ := d.q.readDesc(slot & mask)
 			last_n := n
+			length := desc.Length
 			views[n] = buffer.NewViewFromBytes(d.q.e.regions[desc.Region].data[desc.Offset:desc.Offset + desc.Length])
 			n++
 
 			slot++
 			nSlots--
 
-			// based on buffer size and MTU we expect only one chained buffer
-			if (desc.Flags & descFlagNext) == descFlagNext {
+			for (desc.Flags & descFlagNext) == descFlagNext {
 				if nSlots == 0 {
 					// FIXME: error, incomplete packet
 					break
 				}
 
 				desc, _ = d.q.readDesc(slot & mask)
+				length += desc.Length
 				views[n] = buffer.NewViewFromBytes(d.q.e.regions[desc.Region].data[desc.Offset:desc.Offset + desc.Length])
 				n++
-				vview = buffer.NewVectorisedView(len(views[last_n]) + len(views[last_n + 1]), views[last_n:n])
 
 				slot++
 				nSlots--
-			} else {
-				vview = views[last_n].ToVectorisedView()
 			}
+
+			vview = buffer.NewVectorisedView(int(length), views[last_n:n])
 
 			var (
 				p             tcpip.NetworkProtocolNumber

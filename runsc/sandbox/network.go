@@ -73,7 +73,7 @@ func setupNetwork(conn *urpc.Client, pid int, spec *specs.Spec, conf *boot.Confi
 		// Build the path to the net namespace of the sandbox process.
 		// This is what we will copy.
 		nsPath := filepath.Join("/proc", strconv.Itoa(pid), "ns/net")
-		if err := createInterfacesAndRoutesFromNSVpp(conn, nsPath, conf.HardwareGSO, /* conf.SoftwareGSO */ false, conf.NumNetworkChannels, conf.MemifConfig); err != nil {
+		if err := createInterfacesAndRoutesFromNSVpp(conn, nsPath, conf.HardwareGSO, conf.SoftwareGSO, conf.NumNetworkChannels, conf.MemifConfig); err != nil {
 			return fmt.Errorf("creating interfaces from net namespace %q: %v", nsPath, err)
 		}
 	default:

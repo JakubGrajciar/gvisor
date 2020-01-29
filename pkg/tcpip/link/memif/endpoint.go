@@ -260,6 +260,15 @@ func New(opts *Options) (stack.LinkEndpoint, error) {
 		rxMode:             opts.RxMode,
 	}
 
+	if opts.GSOMaxSize != 0 {
+		if opts.SoftwareGSOEnabled {
+			e.caps |= stack.CapabilitySoftwareGSO
+		} else {
+			e.caps |= stack.CapabilityHardwareGSO
+		}
+		e.gsoMaxSize = opts.GSOMaxSize
+	}
+
 	if e.isMaster {
 		// FIXME: use go-routine
 		listener, err := e.newListener(opts.FDs[0], -1)
@@ -385,6 +394,11 @@ func (e *endpoint) MTU() uint32 {
 // Capabilities implements stack.LinkEndpoint.Capabilities.
 func (e *endpoint) Capabilities() stack.LinkEndpointCapabilities {
 	return e.caps
+}
+
+// GSOMaxSize returns the maximum GSO packet size.
+func (e *endpoint) GSOMaxSize() uint32 {
+	return e.gsoMaxSize
 }
 
 // MaxHeaderLength returns the maximum size of the link-layer header.
@@ -539,12 +553,6 @@ func (e *endpoint) initializeQueues() (err error) {
 		q := &e.rxQueues[qid]
 		q.log2RingSize = e.run.log2RingSize
 		q.ringOffset = e.getRingOffset(0, ringTypeM2S, qid)
-
-		inboundDispatcher, err := e.newQueueDispatcher(q)
-		if err != nil {
-			return fmt.Errorf("newQueueDispatcher: %v", err)
-		}
-		e.inboundDispatchers = append(e.inboundDispatchers, inboundDispatcher)
 	}
 
 	return nil
