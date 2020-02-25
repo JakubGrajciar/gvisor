@@ -58,6 +58,9 @@ func (c *controlChannel) sendMsg() (err error) {
 		}
 
 		// so this actually works...
+		// nope, it desn't... first file descriptor to be sent
+		// using this function is received by peer each time
+		// this function is called
 		buf := new(bytes.Buffer)
 		err = binary.Write(buf, binary.LittleEndian, scm.Header)
 		if err != nil {

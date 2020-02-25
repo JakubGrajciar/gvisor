@@ -283,10 +283,108 @@ func createInterfacesAndRoutesFromNS(conn *urpc.Client, nsPath string, hardwareG
 	return nil
 }
 
+func createMemifInterface(iface *net.Interface, fd int, idx int, mifcfg memif.Config, ip4addrs []*net.IPNet, routes []boot.Route, args *boot.CreateLinksAndRoutesArgs, softwareGSO bool) error {
+
+	link := boot.MemifLink{
+		Name:               iface.Name,
+		// TODO: user configured
+		ID:                 uint32(idx),
+		IsMaster:           mifcfg.IsMaster,
+		NumQueuePairs:      mifcfg.NumQueuePairs,
+		Log2RingSize:       mifcfg.Log2RingSize,
+		PacketBufferSize:   mifcfg.PacketBufferSize,
+		MTU:                mifcfg.MTU,
+		Routes:             routes,
+	}
+
+	if !mifcfg.IsMaster {
+		// Create control channel socket
+		fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
+		if err != nil {
+			return fmt.Errorf("failed to create socket for %s : %v", iface.Name, err)
+		}
+		usa := &syscall.SockaddrUnix{Name: mifcfg.MemifSocketFile}
+
+		// Connect to listener socket
+		err = syscall.Connect(fd, usa)
+		if err != nil {
+			return fmt.Errorf("failed to connect socket %s : %v", mifcfg.MemifSocketFile, err)
+		}
+		// Create shared memory file
+		mfd, err := memif.MemfdCreate()
+		if err != nil {
+			return err
+		}
+		//return fmt.Errorf(strconv.Itoa(mfd))
+		// create go File from memfd
+		memfdFile := os.NewFile(uintptr(mfd), "memfd-dev")
+		if memfdFile == nil {
+			return fmt.Errorf("NewFile failed %s", iface.Name)
+		}
+		args.FilePayload.Files = append(args.FilePayload.Files, memfdFile)
+
+		// Create eventfd for each queue
+		for i := 0; i < int(link.NumQueuePairs * 2); i++ {
+			efd, err := memif.EventFd()
+			if err != nil {
+				return err
+			}
+			eventFile := os.NewFile(uintptr(efd), "eventfd" + string(i))
+			if eventFile == nil {
+				return fmt.Errorf("NewFile failed %s", iface.Name)
+			}
+			args.FilePayload.Files = append(args.FilePayload.Files, eventFile)
+		}
+	}
+
+	if link.GSOMaxSize == 0 && softwareGSO {
+		// Hardware GSO is disabled. Let's enable software GSO.
+		link.GSOMaxSize = stack.SoftwareGSOMaxSize
+		link.SoftwareGSOEnabled = true
+	}
+
+	// create go File from socket
+	deviceFile := os.NewFile(uintptr(fd), "memif-device-socket")
+	if deviceFile == nil {
+		return fmt.Errorf("NewFile failed %s", iface.Name)
+	}
+	socketEntry := socketEntry {
+		deviceFile: deviceFile,
+		gsoMaxSize: 0,
+	}
+
+	link.GSOMaxSize = socketEntry.gsoMaxSize
+
+	args.FilePayload.Files = append(args.FilePayload.Files, socketEntry.deviceFile)
+
+	// Get the link for the interface.
+	ifaceLink, err := netlink.LinkByName(iface.Name)
+	if err != nil {
+		return fmt.Errorf("getting link for interface %q: %v", iface.Name, err)
+	}
+	link.LinkAddress = ifaceLink.Attrs().HardwareAddr
+
+	// Collect the addresses for the interface, enable forwarding,
+	// and remove them from the host.
+	for _, addr := range ip4addrs {
+		link.Addresses = append(link.Addresses, addr.IP)
+
+		// Steal IP address from NIC.
+		if err := removeAddress(ifaceLink, addr.String()); err != nil {
+			return fmt.Errorf("removing address %v from device %q: %v", iface.Name, addr, err)
+		}
+	}
+
+	args.MemifLinks = append(args.MemifLinks, link)
+
+	return nil
+}
+
 // createInterfacesAndRoutesFromNS scrapes the interface and routes from the
 // net namespace with the given path, creates them in the sandbox, and removes
 // them from the host.
 func createInterfacesAndRoutesFromNSVpp(conn *urpc.Client, nsPath string, hardwareGSO bool, softwareGSO bool, numNetworkChannels int, mifcfg memif.Config) error {
+	listenerFd := -1
 	// Join the network namespace that we will be copying.
 	restore, err := joinNetNS(nsPath)
 	if err != nil {
@@ -309,9 +407,31 @@ func createInterfacesAndRoutesFromNSVpp(conn *urpc.Client, nsPath string, hardwa
 		return fmt.Errorf("cannot run with network enabled in root network namespace")
 	}
 
+	// Create listener socket
+	if mifcfg.IsMaster {
+		listenerFd, err = syscall.Socket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
+		if err != nil {
+			return fmt.Errorf("failed to create listener socket for memif : %v", err)
+		}
+		usa := &syscall.SockaddrUnix{Name: mifcfg.MemifSocketFile}
+
+		err = syscall.SetsockoptInt(listenerFd, syscall.SOL_SOCKET, syscall.SO_PASSCRED, 1)
+		if err != nil {
+			return fmt.Errorf("failed to set socket option %s : %v", mifcfg.MemifSocketFile, err)
+		}
+		err = syscall.Bind(listenerFd, usa)
+		if err != nil {
+			return fmt.Errorf("failed to bind socket %s : %v", mifcfg.MemifSocketFile, err)
+		}
+		err = syscall.Listen(listenerFd, syscall.SOMAXCONN)
+		if err != nil {
+			return fmt.Errorf("failed to listen on socket %s : %v", mifcfg.MemifSocketFile, err)
+		}
+	}
+
 	// Collect addresses and routes from the interfaces.
 	var args boot.CreateLinksAndRoutesArgs
-	for _, iface := range ifaces {
+	for idx, iface := range ifaces {
 		if iface.Flags&net.FlagUp == 0 {
 			log.Infof("Skipping down interface: %+v", iface)
 			continue
@@ -364,110 +484,11 @@ func createInterfacesAndRoutesFromNSVpp(conn *urpc.Client, nsPath string, hardwa
 			args.DefaultGateway.Name = iface.Name
 		}
 
-		link := boot.MemifLink{
-			Name:               iface.Name,
-			// TODO: user configured
-			ID:                 mifcfg.ID,
-			IsMaster:           mifcfg.IsMaster,
-			NumQueuePairs:      mifcfg.NumQueuePairs,
-			Log2RingSize:       mifcfg.Log2RingSize,
-			PacketBufferSize:   mifcfg.PacketBufferSize,
-			MTU:                mifcfg.MTU,
-			Routes:             routes,
-		}
-
-		// Get the link for the interface.
-		ifaceLink, err := netlink.LinkByName(iface.Name)
+		/* TODO: improve interface id assignment */
+		err = createMemifInterface(&iface, listenerFd, idx - 1, mifcfg, ip4addrs, routes, &args, softwareGSO)
 		if err != nil {
-			return fmt.Errorf("getting link for interface %q: %v", iface.Name, err)
+			return err
 		}
-		link.LinkAddress = ifaceLink.Attrs().HardwareAddr
-
-		// Create control channel socket
-		fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
-		if err != nil {
-			return fmt.Errorf("failed to create socket for %s : %v", iface.Name, err)
-		}
-		usa := &syscall.SockaddrUnix{Name: mifcfg.MemifSocketFile}
-
-		// create go File from socket
-		deviceFile := os.NewFile(uintptr(fd), "memif-device-socket")
-		if deviceFile == nil {
-			return fmt.Errorf("NewFile failed %s", iface.Name)
-		}
-		socketEntry := socketEntry {
-			deviceFile: deviceFile,
-			gsoMaxSize: 0,
-		}
-
-		link.GSOMaxSize = socketEntry.gsoMaxSize
-
-		args.FilePayload.Files = append(args.FilePayload.Files, socketEntry.deviceFile)
-
-		if mifcfg.IsMaster {
-			err = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_PASSCRED, 1)
-			if err != nil {
-				return fmt.Errorf("failed to set socket option %s : %v", mifcfg.MemifSocketFile, err)
-			}
-			err = syscall.Bind(fd, usa)
-			if err != nil {
-				return fmt.Errorf("failed to bind socket %s : %v", mifcfg.MemifSocketFile, err)
-			}
-			err = syscall.Listen(fd, syscall.SOMAXCONN)
-			if err != nil {
-				return fmt.Errorf("failed to listen on socket %s : %v", mifcfg.MemifSocketFile, err)
-			}
-		} else {
-			// Connect to listener socket
-			err = syscall.Connect(fd, usa)
-			if err != nil {
-				return fmt.Errorf("failed to connect socket %s : %v", mifcfg.MemifSocketFile, err)
-			}
-			// Create shared memory file
-			mfd, err := memif.MemfdCreate()
-			if err != nil {
-				return err
-			}
-			//return fmt.Errorf(strconv.Itoa(mfd))
-			// create go File from memfd
-			memfdFile := os.NewFile(uintptr(mfd), "memfd-dev")
-			if memfdFile == nil {
-				return fmt.Errorf("NewFile failed %s", iface.Name)
-			}
-			args.FilePayload.Files = append(args.FilePayload.Files, memfdFile)
-
-			// Create eventfd for each queue
-			for i := 0; i < int(link.NumQueuePairs * 2); i++ {
-				efd, err := memif.EventFd()
-				if err != nil {
-					return err
-				}
-				eventFile := os.NewFile(uintptr(efd), "eventfd" + string(i))
-				if eventFile == nil {
-					return fmt.Errorf("NewFile failed %s", iface.Name)
-				}
-				args.FilePayload.Files = append(args.FilePayload.Files, eventFile)
-			}
-		}
-
-		if link.GSOMaxSize == 0 && softwareGSO {
-			// Hardware GSO is disabled. Let's enable software GSO.
-			link.GSOMaxSize = stack.SoftwareGSOMaxSize
-			link.SoftwareGSOEnabled = true
-		}
-
-		// Collect the addresses for the interface, enable forwarding,
-		// and remove them from the host.
-		for _, addr := range ip4addrs {
-			link.Addresses = append(link.Addresses, addr.IP)
-
-			// Steal IP address from NIC.
-			if err := removeAddress(ifaceLink, addr.String()); err != nil {
-				return fmt.Errorf("removing address %v from device %q: %v", iface.Name, addr, err)
-			}
-		}
-
-		args.MemifLinks = append(args.MemifLinks, link)
 	}
 
 	log.Debugf("Setting up network, config: %+v", args)
