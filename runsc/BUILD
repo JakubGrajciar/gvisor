@@ -52,6 +52,7 @@ go_binary(
         "//pkg/log",
         "//pkg/refs",
         "//pkg/sentry/platform",
+        "//pkg/tcpip/link/memif",
         "//runsc/boot",
         "//runsc/cmd",
         "//runsc/specutils",

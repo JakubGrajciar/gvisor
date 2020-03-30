@@ -283,7 +283,7 @@ func createInterfacesAndRoutesFromNS(conn *urpc.Client, nsPath string, hardwareG
 	return nil
 }
 
-func createMemifInterface(iface *net.Interface, fd int, idx int, mifcfg memif.Config, ip4addrs []*net.IPNet, routes []boot.Route, args *boot.CreateLinksAndRoutesArgs, softwareGSO bool) error {
+func createMemifInterface(iface *net.Interface, fd int, idx int, mifcfg memif.Config, ip4addrs []*net.IPNet, routes []boot.Route, args *boot.CreateLinksAndRoutesArgs, softwareGSO bool) (err error) {
 
 	link := boot.MemifLink{
 		Name:               iface.Name,
@@ -299,7 +299,7 @@ func createMemifInterface(iface *net.Interface, fd int, idx int, mifcfg memif.Co
 
 	if !mifcfg.IsMaster {
 		// Create control channel socket
-		fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
+		fd, err = syscall.Socket(syscall.AF_UNIX, syscall.SOCK_SEQPACKET, 0)
 		if err != nil {
 			return fmt.Errorf("failed to create socket for %s : %v", iface.Name, err)
 		}
@@ -319,7 +319,7 @@ func createMemifInterface(iface *net.Interface, fd int, idx int, mifcfg memif.Co
 		// create go File from memfd
 		memfdFile := os.NewFile(uintptr(mfd), "memfd-dev")
 		if memfdFile == nil {
-			return fmt.Errorf("NewFile failed %s", iface.Name)
+			return fmt.Errorf("NewFile failed memfd-dev %s", iface.Name)
 		}
 		args.FilePayload.Files = append(args.FilePayload.Files, memfdFile)
 
@@ -331,7 +331,7 @@ func createMemifInterface(iface *net.Interface, fd int, idx int, mifcfg memif.Co
 			}
 			eventFile := os.NewFile(uintptr(efd), "eventfd" + string(i))
 			if eventFile == nil {
-				return fmt.Errorf("NewFile failed %s", iface.Name)
+				return fmt.Errorf("NewFile failed eventfd %s", iface.Name)
 			}
 			args.FilePayload.Files = append(args.FilePayload.Files, eventFile)
 		}
@@ -346,7 +346,7 @@ func createMemifInterface(iface *net.Interface, fd int, idx int, mifcfg memif.Co
 	// create go File from socket
 	deviceFile := os.NewFile(uintptr(fd), "memif-device-socket")
 	if deviceFile == nil {
-		return fmt.Errorf("NewFile failed %s", iface.Name)
+		return fmt.Errorf("NewFile failed memif-device-socket %s", iface.Name)
 	}
 	socketEntry := socketEntry {
 		deviceFile: deviceFile,

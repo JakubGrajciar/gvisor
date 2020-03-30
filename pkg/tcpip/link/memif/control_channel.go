@@ -423,6 +423,20 @@ func (c *controlChannel) parseConnected() (err error) {
 	return nil
 }
 
+func (c *controlChannel) parseDisconnect() (err error) {
+	var dc MsgDisconnect
+
+	buf := bytes.NewReader(c.data[msgTypeSize:])
+	err = binary.Read(buf, binary.LittleEndian, &dc)
+	if err != nil {
+		return
+	}
+
+	// TODO: disconnect
+
+	return fmt.Errorf("disconnect received: %s", string(dc.String[:]))
+}
+
 func (c *controlChannel) parseMsg() (error) {
 	var msgType msgType
 	var err error
@@ -523,8 +537,13 @@ func (c *controlChannel) parseMsg() (error) {
 		if err != nil {
 			return fmt.Errorf("parseConnected: %s", err)
 		}
+	} else if msgType ==msgTypeDisconnect {
+		err = c.parseDisconnect()
+		if err != nil {
+			return fmt.Errorf("parseDisconnect: %s", err)
+		}
 	} else {
-		return fmt.Errorf("unknown message")
+		return fmt.Errorf("unknown message %d", msgType)
 	}
 
 	return nil

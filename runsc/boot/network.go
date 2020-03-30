@@ -137,9 +137,9 @@ func (n *Network) CreateLinksAndRoutes(args *CreateLinksAndRoutesArgs, _ *struct
 				// control channel FD
 				wantFDs += 1
 			} else {
-				// control channel FD (socket) FDs[0]
-				// memory region FD (memfd) FDs[1]
+				// memory region FD (memfd) FDs[0]
 				// one eventfd per queue FDs[NumQueuePairs]
+				// control channel FD (socket) FDs[-1]
 				wantFDs += 2
 				wantFDs += int(l.NumQueuePairs * 2)
 			}

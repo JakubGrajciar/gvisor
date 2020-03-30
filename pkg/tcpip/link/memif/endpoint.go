@@ -282,7 +282,7 @@ func New(opts *Options) (stack.LinkEndpoint, error) {
 		}
 		// Assert we received a connection request
 	} else {
-		e.memfdFd = opts.FDs[1]
+		e.memfdFd = opts.FDs[0]
 		// assign endpoint and interrupt fd to queues
 		for i := uint16(0); i < opts.NumQueuePairs; i++ {
 			txq := queue {
@@ -293,7 +293,7 @@ func New(opts *Options) (stack.LinkEndpoint, error) {
 				ringOffset: 0,
 				lastHead: 0,
 				lastTail: 0,
-				interruptFd: opts.FDs[2 + i],
+				interruptFd: opts.FDs[1 + i],
 			}
 			e.txQueues = append(e.txQueues, txq)
 
@@ -305,12 +305,12 @@ func New(opts *Options) (stack.LinkEndpoint, error) {
 				ringOffset: 0,
 				lastHead: 0,
 				lastTail: 0,
-				interruptFd: opts.FDs[2 + i + opts.NumQueuePairs],
+				interruptFd: opts.FDs[1 + i + opts.NumQueuePairs],
 			}
 			e.rxQueues = append(e.rxQueues, rxq)
 		}
 
-		control, err := e.newControlChannel(opts.FDs[0], -1)
+		control, err := e.newControlChannel(opts.FDs[(opts.NumQueuePairs * 2) + 1], -1)
 		if err != nil {
 			return nil, err
 		}

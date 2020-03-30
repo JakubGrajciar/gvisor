@@ -24,7 +24,6 @@
 package memif
 
 import (
-	"syscall"
 	"fmt"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -61,6 +60,7 @@ retry:
 		// make sure there are enough buffers available
 		// packet buffer size = 32768, MTU = 65536
 		if nFree == 0 {
+			q.interrupt()
 			continue
 		}
 
@@ -82,6 +82,7 @@ retry:
 		for n < len(b0) {
 			nFree--
 			if nFree == 0 {
+				q.interrupt()
 				goto retry
 			}
 			d.Flags |= descFlagNext
@@ -109,6 +110,7 @@ retry:
 			for n < len(b1) {
 				nFree--
 				if nFree == 0 {
+					q.interrupt()
 					goto retry
 				}
 				d.Flags |= descFlagNext
@@ -137,6 +139,7 @@ retry:
 			for n < len(b2) {
 				nFree--
 				if nFree == 0 {
+					q.interrupt()
 					goto retry
 				}
 				d.Flags |= descFlagNext
@@ -172,11 +175,7 @@ retry:
 			q.writeHead(slot)
 		}
 
-		isInterrupt, _ := q.isInterrupt()
-		if isInterrupt {
-			b := []byte{1}
-			syscall.Write(q.interruptFd, b)
-		}
+		q.interrupt()
 
 		return nil
 	}
@@ -275,6 +274,7 @@ func (e *endpoint) WritePackets(r *stack.Route, gso *stack.GSO, hdrs []stack.Pac
 
 // FIXME: timeout or limit retry count
 retry:
+
 	if e.isMaster {
 		slot = q.readTail()
 		nFree = q.readHead() - slot
@@ -285,7 +285,7 @@ retry:
 
 	// assert buffer length: memif 2048 packet < 1500
 	if nFree < uint16(n) {
-		panic("aaa")
+		q.interrupt()
 		goto retry
 	}
 
@@ -416,11 +416,7 @@ retry:
 		q.writeHead(slot)
 	}
 
-	isInterrupt, _ := q.isInterrupt()
-	if isInterrupt {
-		b := []byte{1}
-		syscall.Write(q.interruptFd, b)
-	}
+	q.interrupt()
 
 	return n, nil
 }

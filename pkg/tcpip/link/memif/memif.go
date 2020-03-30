@@ -15,6 +15,8 @@
 package memif
 
 import (
+	"syscall"
+	"fmt"
 	"bytes"
 	"encoding/binary"
 )
@@ -213,6 +215,27 @@ func (q *queue) isInterrupt() (bool, error) {
 		return  false, err
 	}
 	return (flags & ringFlagInterrupt) == 0, nil
+}
+
+func (q *queue) interrupt() (error) {
+	intr, err := q.isInterrupt()
+	if err != nil {
+		return err
+	}
+
+	if intr {
+		buf := make([]byte, 8)
+		binary.PutUvarint(buf, 1)
+		n, err := syscall.Write(q.interruptFd, buf[:])
+		if err != nil {
+			return err
+		}
+		if n != 8 {
+			return fmt.Errorf("Faild to write to eventfd")
+		}
+	}
+
+	return nil
 }
 
 type Ring struct {
